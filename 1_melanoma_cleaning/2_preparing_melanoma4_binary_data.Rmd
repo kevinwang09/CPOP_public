@@ -1,0 +1,168 @@
+---
+title: "Preparing Melanoma-4 binary data"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2020 Jan 13, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 10
+    fig_width: 10
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary 
+
+This document will record all analysis related to the curation of Melanoma-4 data. 
+
+# Loading 
+
+## Packages
+
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+})
+
+theme_set(theme_classic(12) +
+            theme(legend.position = "bottom"))
+
+named_vector2_df = function(vec,
+                            variable.name = "variable",
+                            value.name = "value"){
+ result = base::data.frame(variable = names(vec),
+                           value = vec)
+ colnames(result) = c(variable.name, value.name)
+ return(result)
+}
+```
+
+## Data
+
+```{r}
+file_version = "2020_Apr_25"
+load(paste0(
+  "data/Melanoma4_survival_",
+  file_version, ".RData"
+))
+```
+
+
+# MIA binary class based on RFS
+
+```{r}
+mia_array_rfs_class = rfs_array_sample_data_reduced$rfs_class
+mia_ns_rfs_class = rfs_ns_sample_data_reduced$rfs_class
+
+names(mia_array_rfs_class) = rfs_array_sample_data_reduced$tbid
+names(mia_ns_rfs_class) = rfs_ns_sample_data_reduced$tbid
+
+identical(mia_array_rfs_class, 
+          mia_ns_rfs_class)
+```
+
+
+
+# TCGA - stageIII cut at median survival and death
+
+```{r}
+stageIII_tcga_sample_data = tcga_sample_data %>% 
+  dplyr::filter(naive_tumor_stage %in% c("stageIII")) %>%
+  dplyr::mutate(
+    tcga_class = case_when(
+      time <= median(time) & status == 1 ~ "Poor",
+      time >= median(time) & status == 0 ~ "Good",
+      TRUE ~ NA_character_
+    )
+  ) %>% 
+  dplyr::filter(complete.cases(tcga_class))
+
+tcga_class = stageIII_tcga_sample_data$tcga_class
+names(tcga_class) = stageIII_tcga_sample_data$sample_id
+
+tcga_class %>% 
+  table(useNA = "always") %>% 
+  knitr::kable()
+```
+
+
+# Sweden - Regional cut at median survival and death
+
+```{r}
+sweden_sample_data = sweden_sample_data %>% 
+  dplyr::mutate(
+    class = case_when(
+      dss <= median(dss) & dss_dead == 1 ~ "Poor",
+      dss >= median(dss) & dss_dead == 0 ~ "Good",
+      TRUE ~ NA_character_)) %>% 
+  dplyr::filter(complete.cases(class))
+
+sweden_class = sweden_sample_data$class
+names(sweden_class) = sweden_sample_data$sample_id
+sweden_class %>% 
+  table(useNA = "always") %>% 
+  knitr::kable()
+```
+
+
+# Putting together sample and exprs data
+
+```{r}
+list_binary_lassoy = list(
+  ns = mia_ns_rfs_class,
+  array = mia_array_rfs_class, 
+  tcga = tcga_class, 
+  sweden = sweden_class)
+
+stopifnot(identical(
+  names(list_raw_data),
+  names(list_binary_lassoy)
+))
+
+list_binary_lassoy_df = purrr::map_dfr(
+  .x = list_binary_lassoy, 
+  .f = ~ named_vector2_df(
+    vec = .x, 
+    variable.name = "sample_id",
+    value.name = "classification") %>% 
+    as_tibble(),
+  .id = "train_data") %>% 
+  dplyr::mutate(train_data = paste0("train_", train_data))
+```
+
+
+```{r}
+list_raw_data_binary = purrr::map2(
+  .x = list_raw_data,
+  .y = list_binary_lassoy, 
+  .f = ~ .x[, names(.y)]
+)
+```
+
+
+# Saving data 
+
+```{r}
+save(
+  list_raw_data_binary, 
+  list_binary_lassoy,
+  list_binary_lassoy_df,
+  file = paste0("data/processed_data/Melanoma4_binary_", 
+                file_version, ".RData"))
+```
+
+
+
+# Session Info 
+```{r}
+sessionInfo()
+```
+

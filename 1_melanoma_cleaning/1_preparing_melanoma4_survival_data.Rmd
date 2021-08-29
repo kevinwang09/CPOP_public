@@ -1,0 +1,234 @@
+---
+title: "Preparing Melanoma-4 data"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2020 Jan 10, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 10
+    fig_width: 10
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Summary 
+
+This document will record all analysis related to the curation of Melanoma-4 data. 
+
+# Loading 
+
+## Packages
+
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readxl)
+  library(gplots)
+  library(GEOquery)
+})
+
+theme_set(theme_classic(12) +
+            theme(legend.position = "bottom"))
+```
+
+## Data
+
+# MIA45
+```{r}
+file_version = "2020_Jan_12"
+load(paste0(
+  "data/rfs_MIA45_array_ns_",
+  file_version, ".RData"
+))
+```
+
+
+# Sweden data
+
+```{r}
+GSE65904 = GEOquery::getGEO("GSE65904", destdir = "data/geo_data")
+class(GSE65904)
+sweden_eset = assayData(GSE65904)$GSE65904_series_matrix.txt.gz
+
+sweden_exprs = log2(exprs(sweden_eset) + 1L)
+
+dim(sweden_exprs)
+
+sweden_sample = pData(sweden_eset) 
+
+sweden_feature = fData(sweden_eset) %>% as.tbl()
+```
+
+
+## Subsetting genes
+
+```{r}
+gplots::venn(list(
+  ns = rfs_ns_exprs_data_reduced %>% rownames,
+  sweden = sweden_feature$ILMN_Gene))
+
+
+rownames(sweden_exprs) = sweden_feature$ILMN_Gene %>% 
+  toupper %>%
+  str_replace_all("-", "_") %>%
+  str_replace_all("[.]", "_")
+```
+
+## Cleaning sample data
+```{r}
+sweden_sample_data = sweden_sample %>% 
+  dplyr::transmute(
+    sample_id = geo_accession,
+    gender = str_replace_all(characteristics_ch1, "gender: ", ""),
+    age = str_replace_all(characteristics_ch1.1, "age: ", "") %>% as.integer,
+    tumour_stage = str_replace_all(characteristics_ch1.2, "tumor stage: ", ""),
+    tissue_type = str_replace_all(characteristics_ch1.3, "tissue: ", ""),
+    dmfs = str_replace_all(characteristics_ch1.4, "distant metastasis free survival in days: ", "") %>% as.integer,
+    dmfs_dead = str_replace_all(characteristics_ch1.5, "distant metastasis free survival \\(1=death, 0=alive\\): ", "") %>% as.integer(),
+    dss = str_replace_all(characteristics_ch1.6, "disease specific survival in days: ", "") %>% as.integer,
+    dss_dead = str_replace_all(characteristics_ch1.7, "disease specific survival \\(1=death, 0=alive\\): ", "") %>% as.integer()) %>% 
+  dplyr::filter(complete.cases(dss), 
+                complete.cases(dss_dead))
+
+sweden_sample_data %>% glimpse
+```
+
+
+# TCGA - SKCM
+
+## Cleaning gene names
+
+```{r}
+load("data/TCGA_SKCM_allSamples.RData")
+
+rownames(skcmRNAmatricesFPKM) = rownames(skcmRNAmatricesFPKM) %>% toupper %>%
+  str_replace_all("-", "_") %>%
+  str_replace_all("[.]", "_")
+```
+
+## Cleaning samples names
+
+```{r}
+tcga_sample_data = skcmClinical %>% 
+  dplyr::transmute(
+    sample_id = bcr_patient_barcode,
+    gender, 
+    race,
+    status = ifelse(vital_status == "dead", 1, 0),
+    time = coalesce(days_to_death, days_to_last_follow_up),
+    age = age_at_diagnosis,
+    tumor_stage,
+    naive_tumor_stage = case_when(
+      str_detect(tumor_stage, "stage iii") ~ "stageIII",
+      str_detect(tumor_stage, "stage ii") ~ "stageII",
+      str_detect(tumor_stage, "stage i") ~ "stageI",
+      TRUE ~ "others"
+    )
+  ) %>% 
+  dplyr::filter(
+    complete.cases(time), complete.cases(status),
+    time > 0,
+    naive_tumor_stage == "stageIII", 
+    !str_detect(sample_id, "TCGA-EE")
+  )
+
+
+colnames(skcmRNAmatricesFPKM) = stringr::str_sub(colnames(skcmRNAmatricesFPKM), 1, 12)
+
+tcga_common_samples = intersect(
+  tcga_sample_data$sample_id,
+  colnames(skcmRNAmatricesFPKM))
+
+tcga_sample_data = tcga_sample_data %>% 
+  dplyr::filter(sample_id %in% tcga_common_samples)
+
+stopifnot(identical(
+  tcga_sample_data$sample_id, 
+  tcga_common_samples))
+
+tcga_sample_data %>% glimpse
+```
+
+# Preparing data for survival analysis
+
+## Subsetting genes
+
+```{r}
+list_rownames = list(rownames(rfs_array_exprs_data_reduced),
+                     rownames(rfs_ns_exprs_data_reduced),
+                     rownames(skcmRNAmatricesFPKM),
+                     rownames(sweden_exprs))
+
+common_genes = Reduce(intersect, list_rownames)
+
+length(common_genes)
+```
+
+
+```{r}
+raw_ns_exprs_data = rfs_array_exprs_data_reduced[common_genes, ]
+raw_array_data = rfs_ns_exprs_data_reduced[common_genes, ]
+raw_tcga_data = log2(skcmRNAmatricesFPKM[common_genes, tcga_common_samples] + 1L)
+raw_sweden_data = sweden_exprs[common_genes,
+                               sweden_sample_data$sample_id]
+
+list_raw_data = list(
+  ns = raw_ns_exprs_data, 
+  array = raw_array_data,
+  tcga = raw_tcga_data,
+  sweden = raw_sweden_data)
+
+list_raw_data %>% sapply(dim)
+```
+
+
+```{r}
+list_lassoy = list(
+  ns = cbind(
+    time = rfs_ns_sample_data_reduced$RFS + 1L, 
+    status = ifelse(rfs_ns_sample_data_reduced$dead == 1, 1, 0)), 
+  
+  array = cbind(
+    time = rfs_array_sample_data_reduced$RFS + 1L, 
+    status = ifelse(rfs_array_sample_data_reduced$dead == 1, 1, 0)), 
+  
+  tcga = cbind(
+    time = tcga_sample_data$time, 
+    status = ifelse(tcga_sample_data$status == 1, 1, 0)), 
+  
+  sweden = cbind(
+    time = sweden_sample_data$dss, 
+    status = ifelse(sweden_sample_data$dss_dead == 1, 1, 0))
+)
+
+list_lassoy %>% sapply(dim)
+```
+
+
+# Saving data
+```{r}
+save(
+  list_raw_data, 
+  rfs_array_sample_data_reduced,
+  rfs_ns_sample_data_reduced, 
+  tcga_sample_data,
+  sweden_sample_data,
+  list_lassoy,
+  file = paste0("data/processed_data/Melanoma4_survival_", 
+                "2020_Apr_25", ".RData"))
+```
+
+
+# Session Info 
+```{r}
+sessionInfo()
+```
+
