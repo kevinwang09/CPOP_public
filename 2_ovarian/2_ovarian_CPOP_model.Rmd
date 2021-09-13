@@ -1,0 +1,257 @@
+---
+title: "CPOP - Ovarian cancer using the Yoshihara 126 genes"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2020 Mar 4, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+   code_folding: hide
+   fig_height: 10
+   fig_width: 10
+   toc: yes
+   number_sections: true
+   toc_depth: 3
+   toc_float: yes
+  editor_options: 
+    chunk_output_type: console
+---
+
+
+
+# Summary
+
+# Loading 
+
+## Packages
+
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(CPOP)
+  library(glmnet)
+  library(yardstick)
+  library(survival)
+  library(survminer)
+  library(ggsci)
+  library(parallel)
+  library(ggbeeswarm)
+})
+
+theme_set(theme_classic(12) +
+            theme(legend.position = "bottom"))
+```
+
+## Functions
+```{r}
+boxplot_tbl = function(x, index = 1){
+  means = apply(x, index, mean, na.rm = TRUE)
+  medians = apply(x, index, median, na.rm = TRUE)
+  q1 = apply(x, index, quantile, 0.25, na.rm = TRUE)
+  q3 = apply(x, index, quantile, 0.75, na.rm = TRUE)
+  
+  tbl = tibble(
+    object = as_factor(dimnames(x)[[index]]),
+    means, medians, q1, q3)
+  
+  return(tbl)
+}
+```
+
+
+# Data
+
+```{r}
+load("../data/processed_data/ovarian_survival_28_Apr_2020.RData")
+```
+
+## Yoshihara 126 gene list
+```{r}
+yoshihara_genes_tbl = readxl::read_excel("../materials/T1_PDF_484K.xlsx") %>% 
+  janitor::clean_names() %>% 
+  dplyr::mutate(gene_symbol = gene_symbol %>% str_remove_all("[*]"))
+
+(yoshihara_genes = yoshihara_genes_tbl$gene_symbol)
+```
+
+
+```{r}
+common_genes = c(ov_surv_exprs %>% purrr::map(rownames), 
+                 lst(yoshihara_genes)) %>% 
+  Reduce(f = intersect, x = .)
+
+common_genes
+
+ov_reduced_exprs = map(ov_surv_exprs, ~ .x[common_genes, ])
+```
+
+
+```{r}
+ov_lratio = purrr::map(ov_reduced_exprs, ~ .x %>% t %>% CPOP::pairwise_col_diff())
+
+ov_lratio %>% sapply(dim)
+
+ov_surv_y %>% 
+  purrr::map_dbl(~ median(.x[,"time"]))
+
+
+ov_surv_y$japan_a[,"time"]
+
+tibble(
+  data_source = names(ov_reduced_exprs),
+  median_survival = ov_surv_y %>% 
+    purrr::map_dbl(~ median(.x[,"time"]))/12, 
+  n_samples = purrr::map_dbl(ov_reduced_exprs, ncol)) %>% 
+  knitr::kable()
+```
+
+# Visualise the sample-boxplot
+
+
+## Gene Expression
+```{r}
+exprs_boxplot_tbl = purrr::map(ov_reduced_exprs, boxplot_tbl, index = 2)
+
+exprs_boxplot_tbl %>%
+  bind_rows(.id = "data_source") %>% 
+  ggplot(aes(x = object, y = means,
+             colour = data_source)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = means - 1.5*(q3-q1),
+                    ymax = means + 1.5*(q3-q1)), size = 0.1) +
+  ggsci::scale_color_d3() +
+  theme(axis.text.x = element_blank()) +
+  labs(title = "Sample-boxplots of gene expression")
+```
+
+
+## Log-ratio
+```{r}
+lratio_boxplot_tbl = purrr::map(ov_lratio, boxplot_tbl, index = 1)
+
+lratio_boxplot_tbl %>%
+  bind_rows(.id = "data_source") %>% 
+  ggplot(aes(x = object, y = means,
+             colour = data_source)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = means - 1.5*(q3-q1),
+                    ymax = means + 1.5*(q3-q1)), size = 0.1) +
+  ggsci::scale_color_d3() +
+  theme(axis.text.x = element_blank()) +
+  labs(title = "Sample-boxplots of log-ratio")
+```
+
+# Applying CPOP
+
+```{r}
+set.seed(12)
+
+x = colMeans(ov_lratio$japan_a)
+y = colMeans(ov_lratio$tothill)
+w = abs(x - y)^2
+
+one_cpop = CPOP::cpop_model(
+  z1 = ov_lratio$japan_a,
+  z2 = ov_lratio$tothill,
+  y1 = ov_surv_y$japan_a,
+  y2 = ov_surv_y$tothill,
+  family = "cox",
+  nfolds = 5,
+  w = w,
+  alpha = 0.01,
+  s = "lambda.min",
+  cpop2_type = "mag",
+  cpop2_mag = 0.1,
+  intercept = TRUE,
+  cpop1_step_features = "both",
+  n_features = 50
+)
+
+CPOP::plot_cpop(one_cpop, type = "bar")
+```
+
+
+
+```{r}
+cpop_pred_tbl = purrr::map2(
+  .x = ov_surv_raw,
+  .y = ov_lratio,
+  .f = ~ .x %>% mutate(
+    cpop_pred = predict_cpop(one_cpop, newz = .y)$cpop_model_avg,
+    cpop_pred_class = ifelse(cpop_pred <= 0, "low_risk", "high_risk")
+  )
+)
+
+
+cpop_pred_tbl %>% 
+  bind_rows(.id = "data_source") %>% 
+  as_tibble() %>% 
+  ggplot(aes(x = factor(dead), y = cpop_pred,
+             colour = factor(dead))) +
+  geom_violin(draw_quantiles = 0.5) +
+  geom_beeswarm(width = 2) +
+  facet_wrap(~data_source, nrow = 2, scales = "free_y")
+
+library(glue)
+
+list_cpop_info = purrr::imap(
+  .x = cpop_pred_tbl,
+  .f = function(dat, title){
+    cox = coxph(Surv(time, dead) ~ cpop_pred, data = dat)
+    fit = survfit(Surv(time, dead) ~ cpop_pred_class, data = dat)
+    n_samples = nrow(dat)
+    
+    n_high = sum(dat$cpop_pred_class == "high_risk", na.rm = TRUE)
+    n_low = sum(dat$cpop_pred_class == "low_risk", na.rm = TRUE)
+    
+    cox_glance = cox %>% broom::glance()
+    cox_tidy = cox %>% broom::tidy()
+    p_label = ifelse(cox_tidy$p.value < 0.001, 
+                     "p < 0.001", 
+                     paste0("p = ", signif(cox_tidy$p.value, 2)))
+    
+    c_index = signif(cox_glance$concordance, 2)
+    
+    label = glue("High risk: n = ", {n_high},
+                 ". Low risk: n = ", {n_low},
+                 "\n (",
+                 # "(n = ", {n_samples}, ", ",
+                 {p_label}, ", ",
+                 "c = ", {c_index}, ")")
+    
+    labs(title = title,
+         subtitle = label)
+  })
+
+
+
+list_surv_plots = purrr::imap(
+  .x = cpop_pred_tbl,
+  .f = function(dat, title){
+    
+    
+    ggsurvplot(
+      fit = survfit(Surv(time, dead) ~ cpop_pred_class, data = dat),
+      data = dat, pval = TRUE,
+      surv.median.line = "hv")$plot +
+      scale_colour_d3()
+  })
+
+list_surv_plots = purrr::map2(
+  .x = list_surv_plots, 
+  .y = list_cpop_info, 
+  .f = ~ .x + .y
+)
+
+
+ggsave(filename = paste0("../figures/ovarian_survplots_", today, ".eps"),
+       plot = list_surv_plots %>% patchwork::wrap_plots(nrow = 3),
+       height = 15, width = 20)
+```
+
+# Session info
+```{r}
+sessioninfo::session_info()
+```
+

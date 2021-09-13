@@ -1,0 +1,595 @@
+---
+title: "Peloqui - CPOP method"
+author: "Kevin Wang"
+date: "02-Jul-2019"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 8
+    fig_width: 8
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r today}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+```
+
+
+# Summary
+
+# Loading
+
+## Loading packages
+```{r}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(glmnet)
+  library(furrr)
+  library(gplots)
+  library(CPOP)
+})
+
+plan(multicore, workers = 5)
+
+theme_set(theme_classic(14) +
+            theme(legend.position = "bottom"))
+
+lassoLambda = "lambda.min"
+
+saveFigure = TRUE
+```
+
+
+
+## Loading data
+```{r}
+load("../data/processed_data/Peloqui_dataList_8_Nov_2018.RData")
+```
+
+# Boxplot across codeset
+
+```{r}
+cleanedSampleData$Codeset %>% table
+
+raw_plotdf = tibble(
+  sample = colnames(logRawExprsData), 
+  median = apply(logRawExprsData, 2, quantile, 0.5),
+  q1 = apply(logRawExprsData, 2, quantile, 0.25),
+  q3 = apply(logRawExprsData, 2, quantile, 0.75)) %>% 
+  left_join(cleanedSampleData %>% 
+              dplyr::select(sample = SampleGeoAccession, 
+                            Codeset), 
+            by = c("sample"))
+
+p1 = raw_plotdf %>% 
+  ggplot(aes(x = sample, 
+             y = median,
+             colour = Codeset)) +
+  geom_point(size = 0.5) +
+  geom_linerange(aes(ymin = q1, ymax = q3), 
+                 size = 0.1) +
+    labs(x = "Samples",
+       y = "Gene expression values") +
+  scale_colour_manual(values = c("IBD2" = "#E3191C",
+                                 "IBD3" = "#3FA9F5",
+                                 "IBD4" = "#009E73")) + 
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank()) 
+
+raw_pca = prcomp(logRawExprsData %>% t)
+raw_pca_plotdf = tibble(
+  sample = colnames(logRawExprsData),
+  pca1 = raw_pca$x[,1],
+  pca2 = raw_pca$x[,2],
+  pca3 = raw_pca$x[,3],
+  pca4 = raw_pca$x[,4]) %>% 
+  left_join(cleanedSampleData %>% 
+              dplyr::select(sample = SampleGeoAccession, 
+                            Codeset), 
+            by = c("sample"))
+
+p2 = raw_pca_plotdf %>% 
+  ggplot(aes(x = pca3, y = pca4, colour = Codeset)) +
+  geom_point() +
+  scale_colour_manual(values = c("IBD2" = "#E3191C",
+                                 "IBD3" = "#3FA9F5",
+                                 "IBD4" = "#009E73")) + 
+  labs(x = "PCA 3rd component",
+       y = "PCA 4th component")
+
+library(patchwork)
+ggsave(plot = p1/p2 + 
+         patchwork::plot_layout(heights = c(1, 3)), 
+       filename = paste0("../figures/Peloqui_batch_effect_13_Sep_2020.pdf"),
+       height = 10, 
+       width = 8)
+```
+
+
+
+# t-test for codeset 2
+```{r}
+# logRawExprsData = ruv3Norm$`RUV3_k=5` %>% t
+
+stopifnot(identical(
+  colnames(logRawExprsData), 
+  cleanedSampleData$SampleGeoAccession
+))
+###################################
+ttest = genefilter::rowttests(
+  x = logRawExprsData[,cleanedSampleData$Codeset == "IBD2"], 
+  fac = factor(cleanedSampleData[cleanedSampleData$Codeset == "IBD2",]$SampleInflamed)) %>% tibble::rownames_to_column("GeneName")
+###################################
+listRawData_split_codeset = split(x = t(logRawExprsData) %>% data.frame, 
+                                  f = cleanedSampleData$Codeset)
+listRawData_split_codeset = listRawData_split_codeset %>% lapply(as.matrix)
+listRawData_split_codeset = listRawData_split_codeset %>% purrr::map(~.x[,rank(ttest$p.value) <= 100])
+cleanedSampleData_split_codeset = cleanedSampleData %>% 
+  split(x = ., f = .$Codeset)
+sampleInflamed_split_codeset = cleanedSampleData_split_codeset %>% purrr::map("SampleInflamed")
+
+sapply(listRawData_split_codeset, dim)
+sapply(cleanedSampleData_split_codeset, dim)
+purrr::map(sampleInflamed_split_codeset, table)
+```
+
+
+# Building Lasso model on each codeset
+
+```{r}
+set.seed(123)
+
+listLassoModels = purrr::map2(
+  .x = listRawData_split_codeset,
+  .y = sampleInflamed_split_codeset, 
+  .f = ~ glmnet::cv.glmnet(
+    x = .x,
+    y = factor(.y),
+    family = "binomial",
+    alpha = 1,
+    intercept = FALSE)
+)
+
+# purrr::map(listLassoModels, 
+#            CPOP::get_lasso_coef, 
+#            s = lassoLambda)
+```
+
+
+```{r}
+listLassoModels_pred = vector("list", length(listLassoModels))
+names(listLassoModels_pred) = paste0("train_", names(listRawData_split_codeset))
+
+for(i in 1:length(listLassoModels_pred)){
+  listLassoModels_pred[[i]] = purrr::map(
+    .x = listRawData_split_codeset,
+    .f = ~ predict(listLassoModels[[i]],
+                   newx = .x,
+                   s = lassoLambda)
+  )
+}
+
+
+listLassoModels_pred_transpose = listLassoModels_pred %>% transpose() %>%
+  purrr::map(.f = ~ do.call(cbind, .)) %>%
+  purrr::map(magrittr::set_colnames, names(listLassoModels_pred))
+
+names(listLassoModels_pred_transpose) = paste0("pred_", names(listLassoModels_pred_transpose))
+
+# listLassoModels_pred_transpose %>% sapply(head)
+
+listLassoPredData = listLassoModels_pred_transpose %>% 
+  purrr::imap(.x = .,
+              .f = ~ magrittr::set_colnames(
+                x = .x, 
+                value = paste0(.y, "__", colnames(.x)))) %>% 
+  purrr::map(as.data.frame) %>% 
+  purrr::map(tibble::rownames_to_column, var = "sample_name")
+
+for(i in 1:length(listLassoPredData)){
+  pairs(listLassoPredData[[i]][,-1],
+        upper.panel = CPOP::panel_scatter_abhvline,
+        lower.panel = CPOP::panel_idenDist, 
+        main = paste0(names(listLassoPredData)[i]))
+}
+
+
+
+listLassoModels_pred_plotdf = reshape2::melt(listLassoModels_pred_transpose) %>%
+  dplyr::transmute(
+    SampleGeoAccession = Var1,
+    trainData = Var2,
+    predValue = value,
+    predData = L1
+  ) %>% as_tibble() %>% 
+  left_join(cleanedSampleData %>% 
+              dplyr::select(SampleGeoAccession, SampleInflamed), 
+            by = c("SampleGeoAccession"))
+
+
+listLassoModels_pred_plotdf %>%
+  ggplot(aes(x = trainData, 
+             y = predValue,
+             fill = SampleInflamed)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, colour = "red") +
+  # coord_flip() +
+  facet_wrap(~predData) 
+
+###############################
+
+pred_IBD4_plotdf = listLassoModels_pred_plotdf %>%
+  dplyr::filter(predData == "pred_IBD4") %>%
+  distinct(.keep_all = TRUE) %>%
+  tidyr::spread(trainData, predValue) %>%
+  tidyr::gather(key = non_IBD4_data,
+                value = non_IBD4_predValue,
+                -SampleGeoAccession, -predData, -SampleInflamed, -train_IBD4)
+
+
+(listLasso_pred_IBD4 = pred_IBD4_plotdf %>%
+    ggplot(aes(x = CPOP::expit(train_IBD4),
+               y = CPOP::expit(non_IBD4_predValue),
+               colour = SampleInflamed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, colour = "black") +
+    geom_vline(xintercept = 0.5, colour = "black") +
+    geom_hline(yintercept = 0.5, colour = "black") +
+    scale_color_brewer(palette = "Set1") +
+    facet_grid(~non_IBD4_data) +
+    labs(x = "Classification score from IBD4",
+         y = "Classification score from other data") +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+) 
+
+pred_IBD4_plotdf %>% 
+  group_by(non_IBD4_data) %>% 
+  summarise(
+    corr = cor(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)),
+    idenDist = identityDist(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)))
+```
+
+```{r}
+confTable = function(x, y){
+  x = factor(x, levels = c("FALSE", "TRUE"))
+  y = factor(y, levels = c("FALSE", "TRUE"))
+  return(table(x, y))
+}
+
+confTableStats = function(x, y){
+  res1 = confTable(x, y)
+  return(data.frame(t(caret::confusionMatrix(res1)$byClass)))
+}
+```
+
+
+
+## Evaluating prediction performance
+```{r}
+listLassoModels_confPlotdf = listLassoModels_pred_plotdf %>% 
+  dplyr::mutate(
+    predClass = (predValue <= 0) %>% factor,
+    Classification_bool = SampleInflamed == "0") %>% 
+  group_by(trainData, predData) %>% 
+  tidyr::nest() %>% 
+  dplyr::mutate(
+    confStat = purrr::map(.x = data, 
+                          .f = ~ confTableStats(.x$Classification_bool,
+                                                    .x$predClass))
+  ) %>% unnest(confStat) %>% ungroup()
+
+
+listLassoModels_confPlotdf %>% 
+  dplyr::mutate(predData = predData,
+                trainData = trainData) %>%
+  ggplot(aes(x = trainData, y = predData, 
+             fill = Balanced.Accuracy, 
+             label = Balanced.Accuracy %>% round(2))) +
+  geom_tile(colour = "gray") +
+  geom_text() +
+  scale_fill_distiller(palette = "Spectral", limits = c(0.5, 1)) +
+  theme(legend.text = element_text(angle = 90, hjust = 1)) 
+```
+
+
+## Identity distance 
+```{r}
+listLasso_idenDist_plotdf = listLassoModels_pred_transpose %>% 
+  purrr::map(.f = ~ APES::expit(.x)) %>% 
+  purrr::map(.f = ~ proxy::dist(t(.x), method = CPOP::identityDist)) %>% 
+  purrr::map(proxy::as.matrix) %>% 
+  purrr::map_dfr(reshape2::melt, .id = "predData") %>% 
+  dplyr::transmute(
+    predData = predData,
+    trainData1 = Var1,
+    trainData2 = Var2,
+    idenDist = value) %>% 
+  tidyr::separate(col = predData, into = c("pred", "predDataName"), sep = "_", remove = FALSE) %>% 
+  tidyr::separate(col = trainData1, into = c("train1", "trainDataName1"), sep = "_", remove = FALSE) %>% 
+  dplyr::select(-pred, -train1) %>% 
+  dplyr::filter(predDataName == trainDataName1) %>%
+  dplyr::select(-trainDataName1, -trainData1) %>% 
+  dplyr::rename(trainData = trainData2) %>% 
+  as_tibble()
+
+
+listLasso_idenDist_plotdf %>% 
+  ggplot(aes(x = predData, 
+             y = trainData, 
+             fill = idenDist, 
+             label = round(idenDist, 2))) +
+  geom_tile() +
+  geom_text(size = 5) +
+  # scale_size_identity() +
+  scale_fill_distiller(palette = "Spectral", limits = c(0, 1)) +
+  scale_colour_manual(values = c("TRUE" = "black", "FALSE" = "red")) +
+  theme(legend.text = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Using naive lasso models", 
+       subtitle = "Identity distance")
+```
+
+
+# CPOP on IBD2 and 3
+```{r}
+listLogRatioMatrix = purrr::map(listRawData_split_codeset, CPOP::pairwise_col_diff)
+
+set.seed(11234)
+
+IBD_2_3_top_model = CPOP::cpop_model(
+  z1 = listLogRatioMatrix$IBD2,
+  z2 = listLogRatioMatrix$IBD3,
+  y1 = sampleInflamed_split_codeset$IBD2,
+  y2 = sampleInflamed_split_codeset$IBD3,
+  alpha = 1,
+  s = "lambda.min",
+  top1_iterate = TRUE,
+  n_features = 50,
+  intercept = TRUE
+)
+
+IBD_2_3_top_model$feature
+
+plot_cpop(IBD_2_3_top_model, type = "text")
+plot_cpop(IBD_2_3_top_model, type = "ggraph")
+
+listTopFeatures_colmeans = listLogRatioMatrix %>% 
+  purrr::map(~.x[,IBD_2_3_top_model$feature]) %>% 
+  lapply(colMeans, na.rm = TRUE)
+
+pairs(listTopFeatures_colmeans,
+      upper.panel = CPOP::panel_scatter_abline,
+      lower.panel = CPOP::panel_idenDist,
+      main = "Compare log-ratio means")
+```
+
+
+
+
+# Building CPOP model based on first two batch features
+```{r}
+set.seed(98)
+list_model_IBD_2_3_topFeatures = purrr::map2(
+  .x = listLogRatioMatrix,
+  .y = sampleInflamed_split_codeset, 
+  .f = ~ glmnet::cv.glmnet(
+    x = .x[,IBD_2_3_top_model$feature],
+    y = .y,
+    family = "binomial",
+    alpha = 0,
+    nfolds = 5,
+    intercept = TRUE))
+```
+
+
+
+# IBD2-3 Top model evaluation
+```{r}
+list_IBD_2_3_pred = vector("list", length(listLogRatioMatrix))
+names(list_IBD_2_3_pred) = paste0("train_", names(listLogRatioMatrix))
+
+for(i in 1:length(list_IBD_2_3_pred)){
+  list_IBD_2_3_pred[[i]] = purrr::map(
+    .x = listLogRatioMatrix,
+    .f = ~ predict(list_model_IBD_2_3_topFeatures[[i]],
+                   newx = .x[,IBD_2_3_top_model$feature],
+                   s = lassoLambda)
+  )
+}
+
+list_IBD_2_3_pred_transpose = list_IBD_2_3_pred %>% transpose() %>%
+  purrr::map(.f = ~ do.call(cbind, .)) %>%
+  purrr::map(magrittr::set_colnames, names(list_IBD_2_3_pred))
+names(list_IBD_2_3_pred_transpose) = paste0("pred_", names(list_IBD_2_3_pred_transpose))
+
+list_IBD_2_3_pred_data = list_IBD_2_3_pred_transpose %>% 
+  purrr::imap(.x = .,
+              .f = ~ magrittr::set_colnames(
+                x = .x, 
+                value = paste0(.y, "__", colnames(.x)))) %>% 
+  purrr::map(as.data.frame) %>% 
+  purrr::map(tibble::rownames_to_column, var = "sample_name")
+
+
+for(i in 1:length(list_IBD_2_3_pred_data)){
+  pairs(list_IBD_2_3_pred_data[[i]][,-1],
+        upper.panel = CPOP::panel_scatter_abhvline,
+        lower.panel = CPOP::panel_idenDist, 
+        main = paste0(names(list_IBD_2_3_pred_data)[i]))
+}
+
+
+IBD_2_3_pred_plotdf = reshape2::melt(list_IBD_2_3_pred_transpose) %>%
+  dplyr::transmute(
+    SampleGeoAccession = Var1,
+    trainData = Var2,
+    predValue = value,
+    predData = L1
+  ) %>% as_tibble() %>% 
+  left_join(cleanedSampleData %>% 
+              dplyr::select(SampleGeoAccession, SampleInflamed), 
+            by = c("SampleGeoAccession"))
+
+IBD_2_3_pred_plotdf %>%
+  ggplot(aes(x = trainData, 
+             y = predValue,
+             fill = SampleInflamed)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, colour = "red") +
+  facet_wrap(~predData) +
+  labs(title = "Using features from IBD2 and IBD3")
+
+top_pred_IBD4_plotdf = IBD_2_3_pred_plotdf %>%
+  dplyr::filter(predData == "pred_IBD4") %>%
+  distinct(.keep_all = TRUE) %>%
+  tidyr::spread(trainData, predValue) %>%
+  tidyr::gather(key = non_IBD4_data,
+                value = non_IBD4_predValue,
+                -SampleGeoAccession, -predData, -SampleInflamed, -train_IBD4)
+
+
+(IBD_2_3_top_pred_IBD4 = top_pred_IBD4_plotdf %>%
+    ggplot(aes(x = APES::expit(train_IBD4),
+               y = APES::expit(non_IBD4_predValue),
+               colour = SampleInflamed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, colour = "black") +
+    geom_vline(xintercept = 0.5, colour = "black") +
+    geom_hline(yintercept = 0.5, colour = "black") +
+    scale_color_brewer(palette = "Set1") +
+    facet_grid(~non_IBD4_data) +
+    labs(x = "Classification score from IBD4",
+         y = "Classification score from other data") +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2))
+) 
+
+top_pred_IBD4_plotdf %>% 
+  group_by(non_IBD4_data) %>% 
+  summarise(
+    corr = cor(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)),
+    idenDist = identityDist(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)))
+
+```
+
+
+## Evaluating prediction performance
+```{r}
+IBD_2_3_topModel_confPlotdf = IBD_2_3_pred_plotdf %>% 
+  dplyr::mutate(
+    predClass = (predValue <= 0) %>% factor,
+    Classification_bool = SampleInflamed == "0") %>% 
+  group_by(trainData, predData) %>% 
+  tidyr::nest() %>% 
+  dplyr::mutate(
+    confStat = purrr::map(.x = data, 
+                          .f = ~ confTableStats(.x$Classification_bool, 
+                                                .x$predClass))
+  ) %>% unnest(confStat) %>% ungroup()
+
+
+IBD_2_3_topModel_confPlotdf %>% 
+  dplyr::mutate(predData = predData,
+                trainData = trainData) %>%
+  ggplot(aes(x = trainData, y = predData, 
+             fill = Balanced.Accuracy, 
+             label = Balanced.Accuracy %>% round(2))) +
+  geom_tile(colour = "gray") +
+  geom_text() +
+  scale_fill_distiller(palette = "Spectral", limits = c(0.5, 1)) +
+  theme(legend.text = element_text(angle = 90, hjust = 1)) 
+```
+
+
+## Identity distance 
+```{r}
+list_IBD2_3_idenDist_plotdf = list_IBD_2_3_pred_transpose %>% 
+  purrr::map(.f = ~ APES::expit(.x)) %>% 
+  purrr::map(.f = ~ proxy::dist(t(.x), method = CPOP::identityDist)) %>% 
+  purrr::map(proxy::as.matrix) %>% 
+  purrr::map_dfr(reshape2::melt, .id = "predData") %>% 
+  dplyr::transmute(
+    predData = predData,
+    trainData1 = Var1,
+    trainData2 = Var2,
+    idenDist = value) %>% 
+  tidyr::separate(col = predData, into = c("pred", "predDataName"), sep = "_", remove = FALSE) %>% 
+  tidyr::separate(col = trainData1, into = c("train1", "trainDataName1"), sep = "_", remove = FALSE) %>% 
+  dplyr::select(-pred, -train1) %>% 
+  dplyr::filter(predDataName == trainDataName1) %>%
+  dplyr::select(-trainDataName1, -trainData1) %>% 
+  dplyr::rename(trainData = trainData2) %>% 
+  as_tibble()
+
+
+list_IBD2_3_idenDist_plotdf %>% 
+  ggplot(aes(x = predData, 
+             y = trainData, 
+             fill = idenDist, 
+             label = round(idenDist, 2))) +
+  geom_tile() +
+  geom_text(size = 5) +
+  # scale_size_identity() +
+  scale_fill_distiller(palette = "Spectral", limits = c(0, 1)) +
+  scale_colour_manual(values = c("TRUE" = "black", "FALSE" = "red")) +
+  theme(legend.text = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Using CPOP models", 
+       subtitle = "Identity distance")
+```
+
+
+
+```{r}
+combined_pred_IBD4_plotdf = 
+  bind_rows(
+    pred_IBD4_plotdf %>% dplyr::mutate(type = "lasso"),
+    top_pred_IBD4_plotdf %>% dplyr::mutate(type = "CPOP")
+  ) %>% 
+  dplyr::mutate(
+    type = case_when(
+      type == "lasso" ~ "Naive Lasso", 
+      type == "CPOP" ~ "CPOP"),
+    non_IBD4_data = case_when(
+      non_IBD4_data == "train_IBD2" ~ "Training data: IBD2",
+      non_IBD4_data == "train_IBD3" ~ "Training data: IBD3"),
+    SampleInflamed = case_when(
+      SampleInflamed == "1" ~ "Inflamed",
+      SampleInflamed == "0" ~ "Not inflamed"
+    )
+  )
+
+(compbined_pred_plot = combined_pred_IBD4_plotdf %>% 
+    ggplot(aes(x = CPOP::expit(non_IBD4_predValue),
+               y = CPOP::expit(train_IBD4),
+               colour = SampleInflamed)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, colour = "black") +
+    geom_vline(xintercept = 0.5, colour = "black") +
+    geom_hline(yintercept = 0.5, colour = "black") +
+    scale_color_brewer(palette = "Set1") +
+    facet_grid(type~non_IBD4_data) +
+    labs(x = "Classification score from other data",
+         y = "Classification score from IBD4") +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)))
+
+ggsave(filename = paste0("../figures/peloqui_CPOP_top100DE_pred_", today, ".pdf"),
+       plot = compbined_pred_plot, width = 7, height = 6)
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+

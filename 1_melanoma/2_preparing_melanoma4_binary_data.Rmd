@@ -50,7 +50,7 @@ named_vector2_df = function(vec,
 ```{r}
 file_version = "2020_Apr_25"
 load(paste0(
-  "data/Melanoma4_survival_",
+  "../data/raw_data/Melanoma4_survival_",
   file_version, ".RData"
 ))
 ```
@@ -155,7 +155,7 @@ save(
   list_raw_data_binary, 
   list_binary_lassoy,
   list_binary_lassoy_df,
-  file = paste0("data/processed_data/Melanoma4_binary_", 
+  file = paste0("../data/processed_data/Melanoma4_binary_", 
                 file_version, ".RData"))
 ```
 

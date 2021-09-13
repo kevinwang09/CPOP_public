@@ -1,0 +1,258 @@
+---
+title: "Peloquin Data Processing"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2018 Feb 10, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 12
+    fig_width: 12
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r today}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+```
+
+# Loading package
+```{r packages}
+options(stringsAsFactors = FALSE)
+
+suppressPackageStartupMessages({
+  ## Bioconductor
+  library(preprocessCore)
+  
+  ## visualisation and presentation
+  
+  
+  ## Data processing/modelling
+  library(tidyverse)
+  library(readxl)
+  library(janitor)
+  library(gridExtra)
+  
+  ## RUV packages
+  library(ruv)
+})
+##############
+##########################################
+
+saveFigure = FALSE
+
+theme_set(theme_classic(20) +
+            theme(legend.position = "bottom"))
+```
+
+
+## Functions
+```{r}
+myQuantileNorm = function(x){
+  tmp = preprocessCore::normalize.quantiles(t(x))
+  tmpColMedian = colMedian(tmp)
+  result = tmp %>%
+    sweep(MARGIN = 2,
+          STATS = tmpColMedian,
+          FUN = "-") %>% t
+  dimnames(result) = dimnames(x)
+  return(result)
+}
+
+rowMedian = function(x, na.rm = TRUE){
+  apply(x, 1, median, na.rm = TRUE)
+}
+
+colMedian = function(x, na.rm = TRUE){
+  apply(x, 2, median, na.rm = TRUE)
+}
+```
+
+
+
+
+# Process GSE73094 Raw data
+
+```{r}
+GSE73094Files = list.files("../data/raw_data/GSE73094/GSE73094_RAW",
+                           full.names = T,
+                           pattern = ".txt")
+
+
+names(GSE73094Files) = GSE73094Files
+
+GSE73094Files_short = GSE73094Files %>% 
+  str_replace_all("../data/raw_data/GSE73094/GSE73094_RAW/", "") %>% 
+  str_extract("GSM[0-9][0-9][0-9][0-9][0-9][0-9][0-9]")
+
+rawData_list = purrr::map(
+  GSE73094Files,
+  ~ read.delim(file = .x, stringsAsFactors = FALSE)
+) 
+
+rawData = rawData_list %>% purrr::map(janitor::remove_empty, which = "cols") %>% 
+  do.call(cbind, .) %>% as.matrix()
+
+rownames(rawData) = rownames(rawData) %>% toupper %>%
+  str_replace("-", "_") %>%
+  str_replace("[.]", "_")
+
+colnames(rawData) = GSE73094Files_short
+
+
+cat("If the following dimensions match with the number of RCC files above, then we have read in all files properly.")
+dim(rawData)
+
+rawFeatureData = data.frame(GeneName = rownames(rawData)) %>% 
+  janitor::clean_names(case = "big_camel")
+################################
+extraSampleData = read_xlsx("../data/raw_data/GSE73094/GSE73094_series_matrix_SampleData.xlsx") %>% 
+  janitor::clean_names(case = "big_camel")
+
+dim(extraSampleData)
+################################
+dateSampleData = read_xlsx("../data/raw_data/GSE73094/IBD_Nanostring_SHARE_n989x712_cleaned.xlsx") %>% 
+  janitor::clean_names(case = "big_camel") %>% 
+  dplyr::rename(
+    SampleDescription = Id,
+    SampleInflamed = Inflamed0No1Yes) %>% 
+  dplyr::mutate(
+    Codeset_SampleID_SampleDescription = paste0(Codeset, "_", PatientId, "_", SampleDescription)
+  )
+
+dim(dateSampleData)
+```
+
+
+# Processing Sample data
+```{r}
+cleanedExtraSampleData = extraSampleData %>% 
+  dplyr::mutate(
+    SampleID = str_remove(SampleCharacteristicsCh1_10, "patient id: "),
+    SampleSite = SampleSourceNameCh1,
+    SampleDisease = SampleCharacteristicsCh1_11,
+    SampleInflamed = str_replace_all(SampleCharacteristicsCh1_12, 
+                                     "inflamed \\(0=no, 1=yes\\): ", "") %>% as.factor,
+    Codeset = str_replace_all(SampleCharacteristicsCh1_13, "nanostring codeset: ", ""),
+    SampleID_SampleDescription = paste0(SampleID, "_", SampleDescription),
+    Codeset_SampleID_SampleDescription = paste0(Codeset, "_", SampleID_SampleDescription),
+    SampleNumbering = row_number(),
+    rawTotalCounts = rawData %>% colSums()
+  ) %>% 
+  dplyr::select(-SampleType) %>% 
+  # dplyr::filter(Codeset == "nanostring codeset: IBD2") %>% 
+  group_by(SampleID_SampleDescription) %>%  ## Number of biological replicates
+  dplyr::mutate(
+    numBioDuplicates = n()
+  ) %>% 
+  group_by(Codeset_SampleID_SampleDescription) %>%  ## Number of technical replicates
+  dplyr::mutate(
+    numCodesetDuplicates = n()
+  ) %>% ungroup() %>% 
+  dplyr::filter(SampleInflamed != "NA")
+
+intersect(dateSampleData$Codeset_SampleID_SampleDescription,
+          cleanedExtraSampleData$Codeset_SampleID_SampleDescription)
+
+cleanedDateSampleData = dateSampleData %>% 
+  dplyr::group_by(Codeset_SampleID_SampleDescription, SampleInflamed) %>% 
+  dplyr::arrange(desc(DateRun)) %>% 
+  dplyr::distinct(DateRun, .keep_all = TRUE)
+
+dim(cleanedDateSampleData)
+
+joinedSampleData = cleanedExtraSampleData %>% 
+  left_join(cleanedDateSampleData,
+            by = c("SampleInflamed", "Codeset",
+                   "Codeset_SampleID_SampleDescription")) %>% ## get date info
+  dplyr::distinct(SampleGeoAccession, .keep_all = TRUE)
+
+dim(joinedSampleData)
+
+
+table(joinedSampleData$numBioDuplicates)
+table(joinedSampleData$numCodesetDuplicates)
+table(joinedSampleData$DateRun, useNA = "always")
+
+uniqueDateRun = unique(joinedSampleData$DateRun) %>% na.omit
+completeDateRun = joinedSampleData %>% 
+  dplyr::filter(complete.cases(DateRun))
+
+
+cleanedSampleData = joinedSampleData %>% 
+  dplyr::mutate(
+    DateRun_imputed = purrr::map(
+      .x = SampleNumbering, 
+      .f = ~ completeDateRun[which.min(abs(completeDateRun$SampleNumbering - .x)), ]$DateRun
+    ) %>% do.call(c, .)
+  )
+
+dim(cleanedSampleData)
+
+logRawExprsData = log2(rawData[, cleanedSampleData$SampleGeoAccession] + 1L)
+TlogRawExprsData = t(logRawExprsData)
+
+dim(logRawExprsData)
+```
+
+
+
+# quantileNorm
+```{r}
+quantNormData = myQuantileNorm(logRawExprsData)
+TquantNormData = t(quantNormData)
+```
+
+
+# RUV3
+
+## Replicates - codeset + biological
+
+```{r}
+ruv3Y = TlogRawExprsData
+
+ruv3M_biological = table(
+  cleanedSampleData$SampleGeoAccession, 
+  cleanedSampleData$SampleID_SampleDescription
+)
+
+variousK = c(1:30)
+ruv3K = 15L
+
+ruv_initial = ruv::RUVIII(
+  Y = ruv3Y,
+  M = ruv3M_biological,
+  k = ruv3K,
+  ctl = rep(TRUE, ncol(ruv3Y)),
+  return.info = TRUE
+)
+
+ruv3Norm = purrr::map(
+  .x = variousK,
+  ~ ruv::RUVIII(
+    Y = ruv3Y,
+    M = ruv3M_biological,
+    ctl = rep(TRUE, ncol(ruv3Y)),
+    k = .x,
+    fullalpha = ruv_initial$fullalpha
+  ))
+
+names(ruv3Norm) = paste0("RUV3_k=", variousK)
+```
+
+
+
+```{r, eval = FALSE}
+save(cleanedSampleData, 
+     logRawExprsData, 
+     rawFeatureData,
+     quantNormData,
+     ruv3Norm,
+     file = "../data/processed_data/Peloqui_dataList_8_Nov_2018.RData")
+```
+

@@ -45,7 +45,7 @@ theme_set(theme_classic(12) +
 ```{r}
 file_version = "2020_Jan_12"
 load(paste0(
-  "data/rfs_MIA45_array_ns_",
+  "../data/raw_data/rfs_MIA45_array_ns_",
   file_version, ".RData"
 ))
 ```
@@ -54,7 +54,7 @@ load(paste0(
 # Sweden data
 
 ```{r}
-GSE65904 = GEOquery::getGEO("GSE65904", destdir = "data/geo_data")
+GSE65904 = GEOquery::getGEO("GSE65904")
 class(GSE65904)
 sweden_eset = assayData(GSE65904)$GSE65904_series_matrix.txt.gz
 
@@ -107,7 +107,7 @@ sweden_sample_data %>% glimpse
 ## Cleaning gene names
 
 ```{r}
-load("data/TCGA_SKCM_allSamples.RData")
+load("../data/raw_data/TCGA_SKCM_allSamples.RData")
 
 rownames(skcmRNAmatricesFPKM) = rownames(skcmRNAmatricesFPKM) %>% toupper %>%
   str_replace_all("-", "_") %>%
@@ -222,7 +222,7 @@ save(
   tcga_sample_data,
   sweden_sample_data,
   list_lassoy,
-  file = paste0("data/processed_data/Melanoma4_survival_", 
+  file = paste0("../data/processed_data/Melanoma4_survival_", 
                 "2020_Apr_25", ".RData"))
 ```
 

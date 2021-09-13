@@ -1,0 +1,276 @@
+---
+title: "Cleaning ovarian cancer"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2020 Mar 4, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+   code_folding: hide
+   fig_height: 10
+   fig_width: 10
+   toc: yes
+   number_sections: true
+   toc_depth: 3
+   toc_float: yes
+  editor_options: 
+    chunk_output_type: console
+---
+
+
+# Summary
+
+# Loading 
+
+## Packages
+
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(survival)
+  library(survminer)
+  library(ggsci)
+  library(ggbeeswarm)
+  
+  library(curatedOvarianData)
+})
+
+theme_set(theme_classic(12) +
+            theme(legend.position = "bottom"))
+```
+
+
+
+# Data
+
+The Yoshihara 2012 CCR paper published a list of 126 genes. We will use this as the starting point to build our CPOP model. In the same paper, there are additional datasets used for validation. We will for now assume these data are of sufficient biological similarity to be applied. 
+
+```{r japan_a}
+data("GSE32062.GPL6480_eset")
+japan_a = GSE32062.GPL6480_eset
+```
+
+```{r tothill}
+data("GSE9891_eset")
+tothill = GSE9891_eset
+```
+
+```{r japan_b}
+data("GSE32063_eset")
+japan_b = GSE32063_eset
+```
+
+```{r tcgarnaseq}
+data("TCGA.RNASeqV2_eset")
+selection = TCGA.RNASeqV2_eset$tumorstage %in% c(3, 4) & TCGA.RNASeqV2_eset$site_of_tumor_first_recurrence == "metastasis"
+selection[is.na(selection)] = FALSE
+
+tcgarnaseq = TCGA.RNASeqV2_eset[,selection]
+```
+
+
+<!-- ```{r tcgaarray} -->
+<!-- data("TCGA_eset") -->
+
+<!-- table(TCGA_eset$tumorstage, -->
+<!--       TCGA_eset$summarystage) -->
+
+<!-- table(TCGA_eset$tumorstage, -->
+<!--       TCGA_eset$grade) -->
+
+<!-- table(TCGA_eset$site_of_tumor_first_recurrence, -->
+<!--       TCGA_eset$tumorstage) -->
+
+<!-- tcgaarray = TCGA_eset[,TCGA_eset$tumorstage %in% c(3, 4) & TCGA_eset$site_of_tumor_first_recurrence == "metastasis"] -->
+<!-- ``` -->
+
+
+```{r bentink}
+data("E.MTAB.386_eset")
+bentink = E.MTAB.386_eset
+```
+
+```{r crijns}
+data("GSE13876_eset")
+crijns = GSE13876_eset
+
+table(crijns$tumorstage,
+      crijns$summarystage)
+
+table(crijns$grade)
+
+crijns = crijns[,crijns$grade %in% c(3, 4)]
+```
+
+```{r mok}
+data("GSE18520_eset")
+mok = GSE18520_eset
+```
+
+```{r}
+# data("GSE49997_eset")
+# pils = GSE49997_eset
+```
+
+
+```{r denkert}
+# data("GSE14764_eset")
+# denkert = GSE14764_eset
+```
+
+```{r yoshihara2010}
+data("GSE17260_eset")
+yoshihara2010 = GSE17260_eset
+```
+
+
+```{r}
+data("GSE26712_eset")
+bonome = GSE26712_eset
+```
+
+
+```{r}
+# data("GSE30161_eset")
+# ferriss = GSE30161_eset
+```
+
+```{r}
+## Missing values exist
+# data("GSE51088_eset")
+# karlan = GSE51088_eset[,GSE51088_eset$tumorstage %in% c(3, 4)]
+# karlan = karlan[(karlan %>% exprs %>% is.na %>% rowSums) == 0, ]
+```
+
+```{r}
+data("GSE19829.GPL8300_eset")
+konst = GSE19829.GPL8300_eset
+```
+
+```{r}
+# data("PMID17290060_eset")
+# dressman = PMID17290060_eset
+```
+
+
+
+```{r}
+list_ovarian_eset = lst(
+  japan_a, tothill, japan_b,
+  tcgarnaseq, bonome, mok, yoshihara2010,
+  bentink, crijns
+  # dressman
+  # konst, 
+  )
+
+list_ovarian_eset %>% 
+  sapply(dim)
+```
+
+# Common genes between datasets
+```{r}
+raw_gene_list = purrr::map(list_ovarian_eset, rownames)
+
+common_genes = Reduce(f = intersect, x = raw_gene_list)
+length(common_genes)
+```
+
+# Survival samples
+```{r}
+ov_pdata = purrr::map(list_ovarian_eset, pData)
+
+
+list_pdata =  list_ovarian_eset %>% 
+  purrr::map(pData) %>% 
+  purrr::map(tibble::rownames_to_column, var = "sample_id")
+
+# list_pdata_filtered = list_pdata %>% 
+#   purrr::map(.f = ~ .x %>% 
+#                dplyr::filter(
+#                  !(summarystage == "early" | summarygrade == "low" | grade %in% c(1,2) 
+#                      # histological_type != "ser")
+#                  )))
+# sapply(list_pdata_filtered, nrow)
+
+ov_surv_raw = purrr::map(
+  .x = list_pdata, 
+  .f = ~ data.frame(
+    sample_id = .x$sample_id,
+    time = .x$days_to_death %>% as.integer,
+    dead = ifelse(.x$vital_status == "deceased", 1, 0)) %>%
+    na.omit() %>% 
+    dplyr::filter(time > 0, 
+                  !is.nan(time),
+                  !is.nan(dead))
+)
+
+ov_surv_raw %>% sapply(nrow)
+
+ov_surv_y = ov_surv_raw %>% 
+  purrr::map(~ .x %>% 
+               dplyr::select(-sample_id)) %>% 
+  purrr::map(~ Surv(time = .x$time, event = .x$dead))
+```
+
+
+# Reduced ovarian cancer
+```{r}
+ov_surv_exprs = purrr::map2(
+  .x = list_ovarian_eset, 
+  .y = ov_surv_raw,
+  .f = ~ exprs(.x[common_genes,.y$sample_id])
+)
+
+ov_surv_exprs %>% sapply(dim)
+```
+
+# Binary samples 
+
+```{r}
+ov_surv_tbl = ov_surv_raw %>% 
+  bind_rows(.id = "data_source")
+
+ov_surv_tbl %>% 
+  ggplot(aes(x = time)) +
+  geom_histogram(aes(y = ..density..)) +
+  facet_wrap(~data_source)
+
+
+ov_surv_tbl %>% 
+  ggplot(aes(x = time,
+             y = ..density..,
+             fill = data_source)) +
+  geom_density(alpha = 0.2) +
+  scale_fill_d3()
+
+p = ov_surv_tbl %>% 
+  ggplot(aes(x = time/365.25,
+             y = ..density..,
+             colour = factor(dead == 1))) +
+  geom_density(alpha = 0.8, size = 2) +
+  scale_colour_d3() +
+  facet_wrap(~ data_source) +
+  labs(x = "Time (years)") 
+
+p
+
+ggsave(p, filename = paste0("figures/ovarian_surv_distribution_", today, ".eps"))
+```
+
+
+# Save data
+```{r}
+save(
+  ov_surv_exprs,
+  ov_surv_raw,
+  ov_pdata,
+  ov_surv_y,
+  file = "data/processed_data/ovarian_survival_28_Apr_2020.RData")
+```
+
+# Session Info 
+```{r}
+sessioninfo::session_info()
+```
