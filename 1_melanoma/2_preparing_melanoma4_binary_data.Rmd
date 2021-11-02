@@ -50,7 +50,7 @@ named_vector2_df = function(vec,
 ```{r}
 file_version = "2020_Apr_25"
 load(paste0(
-  "../data/raw_data/Melanoma4_survival_",
+  "../data/processed_data//Melanoma4_survival_",
   file_version, ".RData"
 ))
 ```

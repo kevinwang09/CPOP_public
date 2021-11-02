@@ -64,7 +64,7 @@ dim(sweden_exprs)
 
 sweden_sample = pData(sweden_eset) 
 
-sweden_feature = fData(sweden_eset) %>% as.tbl()
+sweden_feature = fData(sweden_eset) %>% tibble::as_tibble()
 ```
 
 
@@ -137,7 +137,7 @@ tcga_sample_data = skcmClinical %>%
     complete.cases(time), complete.cases(status),
     time > 0,
     naive_tumor_stage == "stageIII", 
-    !str_detect(sample_id, "TCGA-EE")
+    !str_detect(sample_id, "TCGA-EE") ## EE samples are affliated with MIA, removed. 
   )
 
 
