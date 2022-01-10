@@ -1,0 +1,600 @@
+---
+title: "5 Checking microarray and nanostring consistency"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2021 Jan 10, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 10
+    fig_width: 10
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Summary
+
+
+# Loading 
+
+## Packages
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  
+  library(survminer)
+  library(survival)
+  
+  library(limma)
+  library(ClassifyR)
+  library(patchwork)
+})
+
+theme_set(
+  theme_classic(12) +
+    theme(legend.position = "bottom",
+          axis.text = element_text(colour = "black"),
+          axis.ticks = element_line(colour = "black")))
+```
+
+## Data
+```{r}
+file_version = "2020_Apr_25"
+load(paste0("../data/processed_data/Melanoma4_binary_", file_version, ".RData"))
+```
+
+
+# Microarray - DE analysis
+```{r}
+array_rfs_class = list_binary_lassoy$array
+design_rfs_array = model.matrix(~0+array_rfs_class)
+design_rfs_array_contr = makeContrasts(
+  array_rfs_classPoor - array_rfs_classGood,
+  levels = design_rfs_array)
+
+rfs_array_exprs_data = list_raw_data_binary$array
+
+fit_rfs_array = lmFit(
+  rfs_array_exprs_data, 
+  design = design_rfs_array)
+
+
+fit_rfs_array = contrasts.fit(fit_rfs_array, design_rfs_array_contr)
+fit_rfs_array = eBayes(fit_rfs_array)
+fit_rfs_array_table = topTable(fit_rfs_array, 
+                               adjust.method = "fdr", 
+                               number = "all") %>% 
+  tibble::rownames_to_column("genename") %>% 
+  tibble::as_tibble()
+
+fit_rfs_array_table
+```
+
+# NanoString - DE analysis
+
+```{r}
+ns_rfs_class = list_binary_lassoy$ns
+design_rfs_ns = model.matrix(~0+ns_rfs_class)
+design_rfs_ns_contr = makeContrasts(
+  ns_rfs_classPoor - ns_rfs_classGood,
+  levels = design_rfs_ns)
+
+rfs_ns_exprs_data = list_raw_data_binary$ns
+
+fit_rfs_ns = lmFit(
+  rfs_ns_exprs_data, 
+  design = design_rfs_ns)
+
+
+fit_rfs_ns = contrasts.fit(fit_rfs_ns, design_rfs_ns_contr)
+fit_rfs_ns = eBayes(fit_rfs_ns)
+fit_rfs_ns_table = topTable(fit_rfs_ns, 
+                               adjust.method = "fdr", 
+                               number = "all") %>% 
+  tibble::rownames_to_column("genename") %>% 
+  tibble::as_tibble()
+
+fit_rfs_ns_table
+```
+
+# Combining microarray and NS
+
+## Log-fold
+
+```{r}
+combine_limma_table_long = 
+  bind_rows(fit_rfs_array_table %>% mutate(type = "microarray"), 
+            fit_rfs_ns_table %>% mutate(type = "ns"))
+
+## Join two tables by gene column only
+combine_limma_table_wide = fit_rfs_array_table %>% 
+  dplyr::left_join(fit_rfs_ns_table, 
+                   by = "genename", suffix = c("_array", "_ns"))
+```
+
+```{r}
+compare_logFC = combine_limma_table_wide %>% 
+  ggplot(aes(x = logFC_ns,
+             y = logFC_array)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  labs(x = "logFC on NanoString",
+       y = "logFC on Microarray",
+       title = "Compare logFC between the two platforms")
+
+compare_logFC
+
+cat("The correlation between the two sets of logFC is ", 
+    cor(combine_limma_table_wide$logFC_ns, combine_limma_table_wide$logFC_array))
+
+ggsave(filename = paste0("../figures/compare_logFC_", file_version, ".eps"),
+       plot = compare_logFC,
+       width = 6, height = 6)
+```
+
+
+## Compare t-statistics
+```{r}
+compare_t = combine_limma_table_wide %>% 
+  ggplot(aes(x = t_ns,
+             y = t_array)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, colour = "red") +
+  labs(x = "t-statistics on NanoString",
+       y = "t-statistics on Microarray",
+       title = "Compare t-statistics between the two platforms")
+
+compare_t
+
+cat("The correlation between the two sets of t-statistics is ", 
+    cor(combine_limma_table_wide$t_ns, combine_limma_table_wide$t_array))
+
+ggsave(filename = paste0("../figures/compare_tstat_", file_version, ".eps"),
+       plot = compare_t,
+       width = 6, height = 6)
+```
+
+# Full JID79 sample data (MIA-cohort)
+
+```{r}
+raw2018_sample_data = readxl::read_excel("../data/raw_data/JID_79_FUP&Rx_11Apr2018.xlsx") %>% 
+  janitor::clean_names()
+
+clean2018_sample_data = raw2018_sample_data %>% 
+  dplyr::mutate(
+    tbid = paste0("TB", tumour_id),
+    
+    date_first_recurrence_post_banking_corrected = case_when(
+      complete.cases(date_first_recurrence_post_banking) ~ date_first_recurrence_post_banking,
+      person_fu_status == "Alive NSR" ~ person_date_last_fu_death
+    ),
+    
+    date_first_distant_met_post_banking_corrected = case_when(
+      complete.cases(date_first_distant_met_post_banking) ~
+        date_first_distant_met_post_banking,
+      person_fu_status == "Alive NSR" ~ person_date_last_fu_death
+    ),
+    RFS = as.integer(
+      difftime(date_first_recurrence_post_banking_corrected,
+               tumour_date_banked,
+               units = "days")/30),
+    DMS = as.integer(
+      difftime(date_first_distant_met_post_banking_corrected,
+               tumour_date_banked,
+               units = "days")/30),
+    OS = as.integer(difftime(person_date_last_fu_death, 
+                             tumour_date_banked,
+                             units = "days")/30),
+    dead = ifelse(str_detect(person_fu_status, "Alive"), 0, 1)
+  )
+```
+
+# KM survival plots
+
+## RFS
+```{r}
+rfs_surv = survfit(Surv(RFS, dead) ~ 1, data = clean2018_sample_data)
+
+surv_median(rfs_surv)
+
+ggsurvplot(rfs_surv, data = clean2018_sample_data,
+           surv.median.line = "hv", # Add medians survival
+           legend.title = "RFS",
+           risk.table = TRUE,
+           tables.height = 0.2,
+           tables.theme = theme_cleantable())
+```
+
+
+
+## DMS
+```{r}
+dms_surv = survfit(Surv(DMS, dead) ~ 1, data = clean2018_sample_data)
+
+surv_median(dms_surv)
+
+ggsurvplot(dms_surv, data = clean2018_sample_data,
+           surv.median.line = "hv", # Add medians survival
+           legend.title = "DMS",
+           risk.table = TRUE,
+           tables.height = 0.2,
+           tables.theme = theme_cleantable())
+```
+
+
+
+## OS
+```{r}
+os_surv = survfit(Surv(OS, dead) ~ 1, data = clean2018_sample_data)
+
+surv_median(os_surv)
+
+ggsurvplot(os_surv, data = clean2018_sample_data,
+           surv.median.line = "hv", # Add medians survival
+           legend.title = "os",
+           risk.table = TRUE,
+           tables.height = 0.2,
+           tables.theme = theme_cleantable())
+```
+
+# Loading full microarray and nanostring data
+
+## Microarray - 79 samples identical to the JID79 cohort
+
+```{r}
+file_version = "2020_Jan_12"
+load(paste0("../data/processed_data/Chip1to12_144samples_matched_",
+            file_version, ".RData"))
+```
+
+```{r, fig.height=6,fig.width=6}
+gplots::venn(list(
+  microarray_samples = colnames(array_exprs_data),
+  cleaned2018_samples = clean2018_sample_data$tbid
+))
+```
+
+## NanoString - 144 samples (incl replicates)
+
+The NanoString platform accommodates 12 samples per chip. And a total of 12 chips data were generated in 2018. These samples include some replicates (hence the overlap is more than 79 samples). The NS samples, is a super-set of the binary classification of OS/RFS when the microarray analysis was performed in 2012. 
+
+```{r, fig.height=6,fig.width=6}
+gplots::venn(list(
+  ns_144_samples = ns_cleaned_sample_data$sample_id,
+  cleaned2018_samples = clean2018_sample_data$tbid
+))
+
+gplots::venn(list(
+  ns_unique_samples = ns_cleaned_sample_data$sample_id %>% unique,
+  cleaned2018_samples = clean2018_sample_data$tbid
+))
+```
+
+
+# Creating sample class using RFS
+
+## Microarray
+```{r}
+array_2018sample_data = clean2018_sample_data %>% 
+  dplyr::mutate(
+    rfs_class = case_when(
+      (RFS >= 4*12 & person_fu_status == "Alive NSR") ~ "Good",
+      (RFS <= 1*12 & person_fu_status == "Dead, melanoma") ~ "Poor",
+      TRUE ~ NA_character_
+    ) %>% as.factor(),
+    os_class = case_when(
+      (OS >= 4*12 & person_fu_status == "Alive NSR") ~ "Good",
+      (OS <= 1*12 & person_fu_status == "Dead, melanoma") ~ "Poor",
+      TRUE ~ NA_character_
+    ) %>% as.factor()
+  )
+
+with(array_2018sample_data, 
+     table(os_class, rfs_class, useNA = "always"))
+
+os_vs_rfs = array_2018sample_data %>% 
+  ggplot(aes(
+    x = OS, y = RFS,
+    colour = ifelse(complete.cases(os_class), as.character(os_class), "Neither"),
+    shape = ifelse(complete.cases(rfs_class), as.character(rfs_class), "Neither"))) +
+  geom_point(size = 3, stroke = 1.2) +
+  scale_shape_discrete(solid = FALSE) +
+  labs(colour = "OS classification",
+       shape = "RFS classification",
+       title = "Comparing samples with OS and non-missing RFS")
+
+os_vs_rfs
+```
+
+## NanoString (unique sample with top count)
+```{r}
+ns_cleaned_sample_data_unique = ns_cleaned_sample_data %>% 
+  dplyr::mutate(
+    total_counts = colSums(ns_cleaned_exprs_data)
+  ) %>% 
+  group_by(sample_id) %>% 
+  dplyr::arrange(-total_counts) %>% 
+  dplyr::distinct(sample_id, .keep_all = TRUE) %>% 
+  ungroup()
+
+
+ns_2018sample_data_unique = clean2018_sample_data %>% 
+  dplyr::left_join(
+    ns_cleaned_sample_data_unique, 
+    by = c("tbid" = "sample_id")) %>% 
+  dplyr::mutate(
+    rfs_class = case_when(
+      (RFS >= 4*12 & person_fu_status == "Alive NSR") ~ "Good",
+      (RFS <= 1*12 & person_fu_status == "Dead, melanoma") ~ "Poor",
+      TRUE ~ NA_character_) %>% as.factor(),
+    os_class = case_when(
+      (OS >= 4*12 & person_fu_status == "Alive NSR") ~ "Good",
+      (OS <= 1*12 & person_fu_status == "Dead, melanoma") ~ "Poor",
+      TRUE ~ NA_character_
+    ) %>% as.factor())
+
+with(ns_2018sample_data_unique, 
+     table(os_class, rfs_class, useNA = "always"))
+```
+
+
+# Correlate all genes 
+```{r}
+rfs_ns_exprs_data %>% dim
+rfs_array_exprs_data %>% dim
+
+common_genes = intersect(
+  rownames(rfs_ns_exprs_data),
+  rownames(rfs_array_exprs_data))
+
+
+# rfs_ns_exprs_data[common_genes, ], rfs_array_exprs_data[common_genes,]
+
+common_genes_corr = tibble(
+  common_genes, 
+  ns = purrr::map(.x = common_genes, .f = ~ rfs_ns_exprs_data[.x, ]),
+  array = purrr::map(.x = common_genes, .f = ~ rfs_array_exprs_data[.x, ]),
+  corr = purrr::map_dbl(.x = common_genes,
+           .f = ~ cor(rfs_ns_exprs_data[.x, ], rfs_array_exprs_data[.x,])))
+
+
+common_genes_corr_boxplot = common_genes_corr %>% 
+  ggplot(aes(x = "1", y = corr)) +
+  geom_boxplot() +
+  labs(x = "", 
+       y = "Correlation")
+
+
+
+common_genes_corr_top6 = common_genes_corr %>% 
+  dplyr::filter(rank(-corr) <= 6) %>% 
+  unnest(c(ns, array)) %>% 
+  ggplot(aes(x = ns, y = array)) +
+  geom_point() +
+  ggpubr::stat_cor() +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  facet_wrap(~common_genes, scales = "free") +
+  labs(x = "NanoString expression", 
+       y = "Microarray expression")
+
+
+
+ggsave(filename = paste0("../figures/corr_ns_array_genes_", file_version, ".eps"),
+       plot = common_genes_corr_top6 + 
+  common_genes_corr_boxplot + 
+  patchwork::plot_layout(widths = c(3, 1)),
+       width = 10, height = 6)
+```
+
+
+# Curating RFS samples before saving
+
+## Subsetting genes
+
+```{r}
+reduced_genes = intersect(
+  rfs_array_exprs_data %>% rownames,
+  rfs_ns_exprs_data %>% rownames  
+) %>% sort
+
+rfs_array_exprs_data_reduced = rfs_array_exprs_data[reduced_genes, ]
+rfs_ns_exprs_data_reduced = rfs_ns_exprs_data[reduced_genes, ]
+```
+
+
+## Subsetting samples 
+
+```{r}
+array_2018sample_data_filtered = array_2018sample_data %>% 
+  dplyr::filter(complete.cases(rfs_class))
+rfs_array_sample_data_reduced = array_2018sample_data_filtered
+
+ns_2018sample_data_filtered = ns_2018sample_data_unique %>% 
+  dplyr::filter(complete.cases(rfs_class))
+rfs_ns_sample_data_reduced = ns_2018sample_data_filtered
+
+colnames(rfs_ns_exprs_data_reduced) = rfs_ns_sample_data_reduced$tbid
+```
+
+
+```{r}
+stopifnot(identical(
+  rfs_array_exprs_data_reduced %>% dimnames,
+  rfs_ns_exprs_data_reduced %>% dimnames
+))
+```
+
+# ClassifyR on the classifications
+
+```{r, eval = FALSE}
+nPerm = 100
+nCores = 5
+
+resubstituteParams = ResubstituteParams(
+  nFeatures = c(20, 50, 100),
+  performanceType = "balanced error",
+  better = "lower")
+
+crParams = list(
+  SelectParams(limmaSelection, 
+               "Moderated t Statistic",
+               resubstituteParams = resubstituteParams),
+  TrainParams(SVMtrainInterface),
+  PredictParams(SVMpredictInterface))
+```
+
+## Array + OS
+```{r, eval = FALSE}
+array_exprs_data %>% dim
+table(array_2018sample_data$rfs_class, useNA = "always")
+
+array_os_sample_data = array_2018sample_data %>% 
+  dplyr::filter(complete.cases(os_class))
+
+array_os_exprs_data = array_exprs_data[unique(rownames(array_exprs_data)),array_os_sample_data$tbid]
+
+array_os_class_results <- runTests(
+  array_os_exprs_data,
+  array_os_sample_data$os_class,
+  datasetName = "array_os_classifyR",
+  classificationName = "array_os", 
+  permutePartition = "fold",
+  permutations = nPerm, folds = 5,
+  verbose = 3, seed = 2018,
+  parallelParams = MulticoreParam(workers = nCores),
+  params = crParams
+)
+```
+
+## Array + RFS
+
+
+```{r, eval = FALSE}
+array_exprs_data %>% dim
+table(array_2018sample_data$rfs_class, useNA = "always")
+
+array_rfs_sample_data = array_2018sample_data %>% 
+  dplyr::filter(complete.cases(rfs_class))
+
+array_rfs_exprs_data = array_exprs_data[unique(rownames(array_exprs_data)),array_rfs_sample_data$tbid]
+
+array_rfs_class_results <- runTests(
+  array_rfs_exprs_data,
+  array_rfs_sample_data$rfs_class,
+  datasetName = "array_rfs_classifyR",
+  classificationName = "array_rfs", 
+  permutePartition = "fold",
+  permutations = nPerm, folds = 5,
+  verbose = 3, seed = 2018,
+  parallelParams = MulticoreParam(workers = nCores),
+  params = crParams
+)
+```
+
+
+## NS + OS
+
+```{r, eval = FALSE}
+ns_os_sample_data = ns_2018sample_data_unique %>% 
+  dplyr::filter(complete.cases(os_class),
+                file_name %in% colnames(ns_cleaned_exprs_data))
+
+ns_os_exprs_data = log2(ns_cleaned_exprs_data[,ns_os_sample_data$file_name] + 1L)
+
+
+ns_os_class_results <- runTests(
+  ns_os_exprs_data,
+  ns_os_sample_data$os_class,
+  datasetName = "ns_os_classifyR",
+  classificationName = "ns_os", 
+  permutePartition = "fold",
+  permutations = nPerm, folds = 5,
+  verbose = 3, seed = 2018,
+  parallelParams = MulticoreParam(workers = nCores),
+  params = crParams
+)
+
+```
+
+
+## NS + RFS
+
+```{r, eval = FALSE}
+ns_rfs_sample_data = ns_2018sample_data_unique %>% 
+  dplyr::filter(complete.cases(rfs_class),
+                file_name %in% colnames(ns_cleaned_exprs_data))
+
+ns_rfs_exprs_data = log2(ns_cleaned_exprs_data[,ns_rfs_sample_data$file_name] + 1L)
+
+
+ns_rfs_class_results <- runTests(
+  ns_rfs_exprs_data,
+  ns_rfs_sample_data$rfs_class,
+  datasetName = "ns_rfs_classifyR",
+  classificationName = "ns_rfs", 
+  permutePartition = "fold",
+  permutations = nPerm, folds = 5,
+  verbose = 3, seed = 2018,
+  parallelParams = MulticoreParam(workers = nCores),
+  params = crParams
+)
+```
+
+## Comparing results 
+
+```{r}
+# list_classifyr_results = list(
+#   "array_RFS" = array_rfs_class_results,
+#   "array_OS" = array_os_class_results,
+#   "NS_OS" = ns_os_class_results,
+#   "NS_RFS" = ns_rfs_class_results)
+# saveRDS(list_classifyr_results, file = "../data/processed_data/list_array_ns_classifyR.rds")
+```
+
+```{r}
+list_classifyr_results = readRDS(file = "../data/processed_data/list_array_ns_classifyR.rds")
+
+list_perform = list_classifyr_results %>% 
+  purrr::map(calcCVperformance, "accuracy") %>% 
+  purrr::map(~unlist(.x@performance))
+
+perform_tbl = list_perform %>% 
+  reshape2::melt() %>% 
+  transmute(accuracy = value,
+            type = L1) %>% 
+  as_tibble()
+
+q1 = function(x){quantile(x, 0.25)}
+q3 = function(x){quantile(x, 0.75)}
+
+perform_plot = perform_tbl %>% 
+  ggplot(aes(x = type, y = accuracy)) +
+  geom_boxplot() +
+  labs(x = "Data/Prognosis definition", 
+       y = "Accuracy",
+       title = "Accuracy across MIA data and prognosis class definitions")
+
+
+perform_plot
+
+ggsave(filename = paste0("../figures/perform_plot_", file_version, ".eps"),
+       plot = perform_plot,
+       width = 7, height = 6)
+
+
+pairwise.wilcox.test(x = perform_tbl$accuracy, 
+                     g = perform_tbl$type, p.adjust.method = "fdr")
+```
+
+# Session Info 
+```{r}
+sessioninfo::session_info()
+```
