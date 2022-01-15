@@ -5,7 +5,7 @@ date: "`r paste0('Initiated on 2020 Mar 28, compiled on ', format(Sys.time(), '%
 output:
   html_document:
     code_folding: hide
-    fig_height: 10
+    fig_height: 7
     fig_width: 10
     toc: yes
     number_sections: true
@@ -40,7 +40,7 @@ suppressPackageStartupMessages({
   library(ggsci)
   library(ggbeeswarm)
   library(patchwork)
-  
+  library(fairness)
 })
 
 theme_set(theme_classic(12) +
@@ -141,20 +141,24 @@ list_survival_lassoy = list(
                sweden_sample_data$dss_dead))
 ```
 
-# Single CPOP model from MIA 
+# Single CPOP model from MIA (saved)
 ```{r}
-set.seed(12)
+# set.seed(12)
+# 
+# mia_cpop_binary = CPOP::cpop_model(
+#   z1 = list_lratio_binary$ns,
+#   z2 = list_lratio_binary$array,
+#   y1 = list_binary_lassoy$ns,
+#   y2 = list_binary_lassoy$array,
+#   family = "binomial",
+#   alpha = 0.1,
+#   n_features = 20)
+# 
+# save(mia_cpop_binary, file = "../data/processed_data/shiny_models_2021_Nov_02.RData")
+```
 
-mia_cpop_binary = CPOP::cpop_model(
-  z1 = list_lratio_binary$ns,
-  z2 = list_lratio_binary$array,
-  y1 = list_binary_lassoy$ns,
-  y2 = list_binary_lassoy$array,
-  family = "binomial",
-  alpha = 0.1,
-  n_features = 20)
-
-save(mia_cpop_binary, file = "../data/processed_data/shiny_models_2021_Nov_02.RData")
+```{r}
+load(file = "../data/processed_data/shiny_models_2021_Nov_02.RData")
 ```
 
 
@@ -162,14 +166,12 @@ save(mia_cpop_binary, file = "../data/processed_data/shiny_models_2021_Nov_02.RD
 ```{r}
 mia_single_pred_tcga = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$tcga) %>% 
   join_tcga_sample_data() %>% 
-  dplyr::mutate(
-    pred_prob = CPOP::expit(cpop_model_avg),
-    binary_class = binary_split(pred_prob)) %>% as.data.frame()
+  as.data.frame()
 
-table(mia_single_pred_tcga$binary_class)
+table(mia_single_pred_tcga$cpop_model_avg_class)
 
 singlemia_tcga_km = survminer::ggsurvplot(
-  fit = survfit(Surv(time, status) ~ binary_class, 
+  fit = survfit(Surv(time, status) ~ cpop_model_avg_class, 
                 data = mia_single_pred_tcga), 
   data = mia_single_pred_tcga, 
   break.time.by = 5,
@@ -181,7 +183,7 @@ singlemia_tcga_km2 = singlemia_tcga_km$plot +
 singlemia_tcga_km3 = singlemia_tcga_km$table +
   ggsci::scale_colour_d3()
 
-coxph(Surv(time, status) ~ pred_prob + age + gender, 
+coxph(Surv(time, status) ~ cpop_model_avg_prob + age + gender, 
       data = mia_single_pred_tcga)
 
 singlemia_tcga_km_plots = singlemia_tcga_km2 + singlemia_tcga_km3 +
@@ -194,18 +196,39 @@ ggsave(plot = print(singlemia_tcga_km_plots),
        height = 6, width = 8)
 ```
 
+Fairness calculations is only relevant for TCGA samples with a well defined binary classifications. We will use the definition: 
+
+Good: survived more than the median survival time (26.9 mo, or 2.24 years). 
+Poor: survived less than the median survival time.
+
+```{r}
+print(mia_single_pred_tcga$time %>% median)
+
+equal_odds(
+  data  = mia_single_pred_tcga %>% 
+    dplyr::mutate(
+      tcga_median_class = case_when(
+        status == 0 & time > median(time) ~ "Good",
+        status == 1 & time < median(time) ~ "Poor",
+        TRUE ~ NA_character_)) %>% 
+    dplyr::filter(complete.cases(tcga_median_class)),
+  outcome = 'tcga_median_class',
+  probs   = 'cpop_model_avg_prob',
+  group   = 'gender',
+  cutoff  = 0.5)
+```
+
+
 ## sweden 
 ```{r}
 mia_single_pred_sweden = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$sweden) %>% 
   join_sweden_sample_data() %>% 
-  dplyr::mutate(
-    pred_prob = CPOP::expit(cpop_model_avg),
-    binary_class = binary_split(pred_prob)) %>% as.data.frame()
+  as.data.frame()
 
-table(mia_single_pred_sweden$binary_class)
+table(mia_single_pred_sweden$cpop_model_avg_class)
 
 singlemia_sweden_km = survminer::ggsurvplot(
-  fit = survfit(Surv(time, status) ~ binary_class, 
+  fit = survfit(Surv(time, status) ~ cpop_model_avg_class, 
                 data = mia_single_pred_sweden), 
   data = mia_single_pred_sweden, 
   break.time.by = 5,
@@ -217,7 +240,7 @@ singlemia_sweden_km2 = singlemia_sweden_km$plot +
 singlemia_sweden_km3 = singlemia_sweden_km$table +
   ggsci::scale_colour_d3()
 
-coxph(Surv(time, status) ~ pred_prob + age + gender, 
+coxph(Surv(time, status) ~ cpop_model_avg_prob + age + gender, 
       data = mia_single_pred_sweden)
 
 singlemia_sweden_km_plots = singlemia_sweden_km2 + singlemia_sweden_km3 +
@@ -229,3 +252,61 @@ ggsave(plot = print(singlemia_sweden_km_plots),
        filename = paste0("../figures/singlemia_sweden_km_plots_", today, ".eps"),
        height = 6, width = 8)
 ```
+
+Fairness calculations is only relevant for Sweden samples with a well defined binary classifications. We will use the definition: 
+
+Good: survived more than the median survival time (17.6 mo, or 1.46 years). 
+Poor: survived less than the median survival time.
+
+```{r}
+print(median(mia_single_pred_sweden$time))
+
+equal_odds(
+  data  = mia_single_pred_sweden %>% 
+    dplyr::mutate(
+      sweden_median_class = case_when(
+        status == 0 & time > median(time) ~ "Good",
+        status == 1 & time < median(time) ~ "Poor",
+        TRUE ~ NA_character_)) %>% 
+    dplyr::filter(complete.cases(sweden_median_class)),
+  outcome = 'sweden_median_class',
+  probs   = 'cpop_model_avg_prob',
+  group   = 'gender',
+  cutoff  = 0.5)
+```
+
+# Fairness calculations on NS and Array
+```{r}
+mia_single_pred_ns = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$ns) %>% 
+  left_join(list_binary_lassoy_df %>% 
+              dplyr::filter(train_data == "train_ns"),
+            by = c("samples" = "sample_id")) %>% 
+  left_join(rfs_ns_sample_data_reduced %>% 
+              dplyr::select(samples = tbid, gender = person_sex),
+            by = c("samples"))
+
+equal_odds(
+  data  = mia_single_pred_ns,
+  outcome = 'classification',
+  probs   = 'cpop_model_avg_prob',
+  group   = 'gender',
+  cutoff  = 0.5)
+```
+
+```{r}
+mia_single_pred_array = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$array) %>% 
+  left_join(list_binary_lassoy_df %>% 
+              dplyr::filter(train_data == "train_array"),
+            by = c("samples" = "sample_id")) %>% 
+  left_join(rfs_array_sample_data_reduced %>% 
+              dplyr::select(samples = tbid, gender = person_sex),
+            by = c("samples"))
+
+equal_odds(
+  data  = mia_single_pred_array,
+  outcome = 'classification',
+  probs   = 'cpop_model_avg_prob',
+  group   = 'gender',
+  cutoff  = 0.5)
+```
+
