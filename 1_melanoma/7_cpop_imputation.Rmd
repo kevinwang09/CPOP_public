@@ -1,0 +1,234 @@
+---
+title: "7 CPOP imputation"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2022 Jan 29, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 10
+    fig_width: 10
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Loading
+
+## package
+
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(CPOP)
+  library(glmnet)
+  library(patchwork)
+  library(yardstick)
+})
+
+theme_set(theme_classic(16) +
+            theme(legend.position = "bottom", 
+                  axis.text = element_text(colour = "black"),
+                  axis.ticks = element_line(colour = "black")))
+```
+
+## data
+
+```{r}
+file_version = "2020_Apr_25"
+load(paste0(
+  "../data/processed_data/Melanoma4_binary_",
+  file_version, ".RData"
+))
+
+
+load(paste0(
+  "../data/processed_data/Melanoma4_survival_",
+  file_version, ".RData"
+))
+
+## Bootstrapped MIA features 
+load("../data/processed_data/boot_MIA_cpop_2021_Nov_02.RData")
+```
+
+
+```{r}
+list_lratio_binary = list_raw_data_binary %>%
+  purrr::map(t) %>%
+  purrr::map(CPOP::pairwise_col_diff)
+
+list_lratio_survival = list_raw_data %>%
+  purrr::map(t) %>%
+  purrr::map(CPOP::pairwise_col_diff)
+```
+
+## Customised functions
+```{r}
+join_tcga_sample_data = function(dat){
+  dat %>% 
+    left_join(tcga_sample_data, by = c("samples" = "sample_id")) %>% 
+    dplyr::filter(naive_tumor_stage == "stageIII", !str_detect(samples, "TCGA-EE")) %>% 
+    dplyr::mutate(time = time/365) %>% 
+    dplyr::mutate(
+    tcga_median_class = case_when(
+      status == 0 & time > median(time) ~ "Good",
+      status == 1 & time < median(time) ~ "Poor",
+      TRUE ~ NA_character_))
+}
+
+join_sweden_sample_data = function(dat){
+  dat %>% 
+    left_join(sweden_sample_data, by = c("samples" = "sample_id")) %>% 
+    dplyr::mutate(time = dss/365, status = dss_dead) %>% 
+    dplyr::mutate(
+    sweden_median_class = case_when(
+      status == 0 & time > median(time) ~ "Good",
+      status == 1 & time < median(time) ~ "Poor",
+      TRUE ~ NA_character_))
+}
+```
+
+
+# Bootstrap computation
+
+This computation explores the performance of the CPOP method with additional missingness in the data. 
+
+```{r, eval = FALSE}
+# set.seed(2022)
+# nexp = 100
+# library(furrr)
+# plan(multisession, workers = 5)
+# 
+# one_impute_comp = function(n_missing){
+#   missing_cols = sample(rownames(list_raw_data_binary$tcga), n_missing)
+#   tcga_complete = t(list_raw_data_binary$tcga)
+#   tcga_with_na = tcga_complete
+#   tcga_with_na[, missing_cols] = NA
+# 
+#   mia_cpop_binary_complete = CPOP::cpop_model(
+#     z1 = list_lratio_binary$ns,
+#     z2 = list_lratio_binary$array,
+#     y1 = list_binary_lassoy$ns,
+#     y2 = list_binary_lassoy$array,
+#     family = "binomial",
+#     alpha = 0.1, folds = 5,
+#     n_features = 20)
+# 
+#   mia_cpop_pred_tcga_complete = CPOP::predict_cpop(
+#     cpop_result = mia_cpop_binary_complete,
+#     newz = CPOP::pairwise_col_diff(tcga_complete))
+# 
+#   mia_cpop_pred_tcga_missing = CPOP::predict_cpop(
+#     cpop_result = mia_cpop_binary_complete,
+#     newz = CPOP::impute_cpop(
+#       cpop_result = mia_cpop_binary_complete,
+#       x1 = t(list_raw_data_binary$ns),
+#       x2 = t(list_raw_data_binary$array),
+#       newx = tcga_with_na) %>%
+#       CPOP::pairwise_col_diff())
+# 
+#   return(list(
+#     cpop_feature = mia_cpop_binary_complete$feature,
+#     missing_cols = missing_cols,
+#     mia_cpop_pred_tcga_complete = mia_cpop_pred_tcga_complete,
+#     mia_cpop_pred_tcga_missing = mia_cpop_pred_tcga_missing))
+# }
+# 
+# param_grid = tidyr::expand_grid(
+#   n_missing = c(0, 1, 5, 10, 20, 30, 40, 50),
+#   exp_num = paste0("exp_", 1:nexp))
+```
+
+```{r, eval = FALSE}
+# result_grid = param_grid %>%
+#   dplyr::mutate(
+#     result = furrr::future_map(
+#       .x = n_missing,
+#       .f = ~ one_impute_comp(n_missing = .x),
+#       .progress = TRUE))
+# 
+# saveRDS(result_grid, file = "../data/processed_data/cpop_impute_models_29_Jan_2022.rds")
+```
+
+# Visualisation
+
+```{r}
+result_grid = readRDS(file = "../data/processed_data/cpop_impute_models_29_Jan_2022.rds")
+```
+
+```{r}
+result_grid_tidy = result_grid %>% 
+  dplyr::transmute(
+    n_missing, exp_num,
+    cpop_feature = purrr::map(result, "cpop_feature"),
+    missing_cols = purrr::map(result, "missing_cols"),
+    mia_cpop_pred_tcga_complete = purrr::map(result, "mia_cpop_pred_tcga_complete"),
+    mia_cpop_pred_tcga_missing = purrr::map(result, "mia_cpop_pred_tcga_missing"),
+    missing_cols_in_cpop = purrr::map2_int(
+      missing_cols, cpop_feature, 
+      .f = ~{
+        cpop_genes = str_split(.y, "--") %>% unlist %>% unique
+        return(sum(.x %in% cpop_genes))
+      }))
+
+result_grid_tidy
+```
+
+```{r}
+plotdf = result_grid_tidy %>% 
+  dplyr::transmute(
+    n_missing, exp_num, 
+    missing_cols_in_cpop,
+    missing_cols_in_cpop_binary = ifelse(missing_cols_in_cpop == 0, "All CPOP features present", "Some CPOP features missing"),
+    mia_cpop_pred_tcga_complete_prob = purrr::map(mia_cpop_pred_tcga_complete, "cpop_model_avg_prob"), 
+    mia_cpop_pred_tcga_missing_prob = purrr::map(mia_cpop_pred_tcga_missing, "cpop_model_avg_prob")) %>% 
+  tidyr::unnest(c(mia_cpop_pred_tcga_complete_prob, mia_cpop_pred_tcga_missing_prob))
+```
+
+## Corr and Concordance boxplot
+
+```{r}
+impute_concodance_plot = plotdf %>% 
+  group_by(n_missing, missing_cols_in_cpop_binary, exp_num) %>% 
+  tidyr::nest() %>% 
+  dplyr::summarise(
+    perc_missing = n_missing/nrow(list_raw_data_binary$tcga),
+    x_label = paste0(n_missing, "\n (", scales::percent(perc_missing), ")") %>% 
+      forcats::as_factor(),
+    `Correlation` = purrr::map_dbl(data, ~with(.x, cor(mia_cpop_pred_tcga_complete_prob, mia_cpop_pred_tcga_missing_prob))),
+    `Concordance` = purrr::map_dbl(data, ~with(.x, yardstick::ccc_vec(mia_cpop_pred_tcga_complete_prob, mia_cpop_pred_tcga_missing_prob)))) %>% 
+  ungroup() %>% 
+  tidyr::pivot_longer(cols = c("Correlation", "Concordance")) %>% 
+  ggplot(aes(x = x_label,
+             y = value,
+             colour = missing_cols_in_cpop_binary)) +
+  geom_boxplot() +
+  facet_wrap(~name, scales = "free") +
+  labs(x = "Number of missing columns \n (% of original features)",
+       colour = "Missing conditions")
+
+impute_concodance_plot
+
+ggsave(filename = paste0("../figures/impute_concodance_plot_", today, ".eps"), plot = impute_concodance_plot, 
+       width = 10, height = 5)
+```
+
+```{r}
+plotdf %>% 
+  ggplot(aes(x = mia_cpop_pred_tcga_complete_prob, 
+             y = mia_cpop_pred_tcga_missing_prob,
+             colour = missing_cols_in_cpop_binary)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(aes(group = exp_num), method = "lm", se = FALSE, alpha = 0.1) +
+  facet_wrap(~n_missing, labeller = label_both) +
+  labs(x = "MIA-CPOP model predicting on complete TCGA data",
+       y = "MIA-CPOP model predicting on missing TCGA data",
+       colour = "Missing conditions")
+```
+
