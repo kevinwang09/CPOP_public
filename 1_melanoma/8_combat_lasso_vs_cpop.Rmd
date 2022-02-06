@@ -1,0 +1,836 @@
+---
+title: "8 CPOP vs Combat normalised Lasso predictions"
+author: "Kevin Wang"
+date: "`r paste0('Initiated on 2022 Jan 10, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 10
+    fig_width: 10
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# Summary
+
++ When using Lasso on the MIA-NS or MIA-Microarray data, the features selected are not identical, with many features being selected by only one dataset but not the other. 
+
++ This does not improve when we look at the correlation of prediction value.
+
+
+```{r}
+today = format(Sys.time(), "%Y_%b_%d")
+cat("This file was compiled on", today)
+
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(CPOP)
+  library(glmnet)
+  library(survival)
+  library(survminer)
+  library(patchwork)
+  library(sva)
+  library(fairness)
+  library(yardstick)
+})
+
+theme_set(theme_classic(16) +
+            theme(legend.position = "bottom", 
+                  axis.text = element_text(colour = "black"),
+                  axis.ticks = element_line(colour = "black")))
+```
+
+
+## data
+
+```{r}
+file_version = "2020_Apr_25"
+load(paste0(
+  "../data/processed_data/Melanoma4_binary_",
+  file_version, ".RData"
+))
+
+
+load(paste0(
+  "../data/processed_data/Melanoma4_survival_",
+  file_version, ".RData"
+))
+
+## Bootstrapped MIA features 
+load("../data/processed_data/boot_MIA_cpop_2021_Nov_02.RData")
+```
+
+
+```{r}
+list_lratio_binary = list_raw_data_binary %>%
+  purrr::map(t) %>%
+  purrr::map(CPOP::pairwise_col_diff)
+
+list_lratio_survival = list_raw_data %>%
+  purrr::map(t) %>%
+  purrr::map(CPOP::pairwise_col_diff)
+```
+
+## Customised functions
+```{r}
+join_tcga_sample_data = function(dat){
+  dat %>% 
+    left_join(tcga_sample_data, by = c("samples" = "sample_id")) %>% 
+    dplyr::filter(naive_tumor_stage == "stageIII", !str_detect(samples, "TCGA-EE")) %>% 
+    dplyr::mutate(time = time/365) %>% 
+    dplyr::mutate(
+    tcga_median_class = case_when(
+      status == 0 & time > median(time) ~ "Good",
+      status == 1 & time < median(time) ~ "Poor",
+      TRUE ~ NA_character_))
+}
+
+join_sweden_sample_data = function(dat){
+  dat %>% 
+    left_join(sweden_sample_data, by = c("samples" = "sample_id")) %>% 
+    dplyr::mutate(time = dss/365, status = dss_dead) %>% 
+    dplyr::mutate(
+    sweden_median_class = case_when(
+      status == 0 & time > median(time) ~ "Good",
+      status == 1 & time < median(time) ~ "Poor",
+      TRUE ~ NA_character_))
+}
+
+eval_prediction_df = function(dat){
+  cat("Predicted classes: \n")
+  table(dat$pred_class)
+  
+  cat("KM-plots: \n")
+  print(
+    survminer::ggsurvplot(
+      fit = survfit(Surv(time, status) ~ pred_class, 
+                    data = dat), 
+      data = dat, 
+      break.time.by = 5,
+      pval = TRUE, risk.table = "nrisk_cumevents"))
+  
+  surv_obj = coxph(Surv(time, status) ~ pred_class + age + gender, 
+          data = dat)
+  
+  cat("Cox regression summary: \n")
+  summary(surv_obj)
+  broom::glance(surv_obj, data = dat) %>% glimpse
+  
+  # equal_odds(
+  #   data  = dat %>% 
+  #     dplyr::mutate(
+  #       surv_median_class = case_when(
+  #         status == 0 & time > median(time) ~ "Good",
+  #         status == 1 & time < median(time) ~ "Poor",
+  #         TRUE ~ NA_character_)) %>% 
+  #     dplyr::filter(complete.cases(surv_median_class)),
+  #   outcome = 'surv_median_class',
+  #   probs   = 'pred_prob',
+  #   group   = 'gender',
+  #   cutoff  = 0.5)
+}
+```
+
+
+<!-- # Survival times distributional comparison  -->
+
+
+<!-- ```{r} -->
+<!-- list_surv_times = lst( -->
+<!--   mia = tibble( -->
+<!--     time = rfs_array_sample_data_reduced$RFS,  -->
+<!--     dead = rfs_array_sample_data_reduced$dead),  -->
+<!--   tcga = tibble( -->
+<!--     time = tcga_sample_data$time/365,  -->
+<!--     dead = tcga_sample_data$status), -->
+<!--   sweden = tibble( -->
+<!--     time = sweden_sample_data$dss/365,  -->
+<!--     dead = sweden_sample_data$dss_dead)) -->
+
+<!-- surv_times_tbl = list_surv_times %>% bind_rows(.id = "data_source") -->
+
+<!-- list_survival_lassoy = list( -->
+<!--   ns = Surv(rfs_ns_sample_data_reduced$RFS + 1, -->
+<!--             rfs_ns_sample_data_reduced$dead), -->
+<!--   array = Surv(rfs_array_sample_data_reduced$RFS + 1, -->
+<!--                rfs_array_sample_data_reduced$dead), -->
+<!--   tcga = Surv(tcga_sample_data$time, -->
+<!--                tcga_sample_data$status), -->
+<!--   sweden = Surv(sweden_sample_data$dss, -->
+<!--                sweden_sample_data$dss_dead)) -->
+<!-- ``` -->
+
+# Compute a single CPOP model from MIA-NS and MIA-Microarray (saved)
+```{r}
+# set.seed(12)
+# 
+# mia_cpop_binary = CPOP::cpop_model(
+#   z1 = list_lratio_binary$ns,
+#   z2 = list_lratio_binary$array,
+#   y1 = list_binary_lassoy$ns,
+#   y2 = list_binary_lassoy$array,
+#   family = "binomial",
+#   alpha = 0.1,
+#   n_features = 20)
+# save(mia_cpop_binary, file = "../data/processed_data/shiny_models_2021_Nov_02.RData")
+load(file = "../data/processed_data/shiny_models_2021_Nov_02.RData")
+```
+
+## CPOP binary evaluations
+```{r}
+mia_cpop_pred_tcga = predict_cpop(mia_cpop_binary, newz = list_lratio_binary$tcga) %>% 
+  join_tcga_sample_data() %>% 
+  dplyr::rename(
+    pred_prob = cpop_model_avg_prob,
+    pred_class = cpop_model_avg_class)
+  # dplyr::filter(complete.cases(tcga_median_class))
+
+# eval_prediction_df(mia_cpop_pred_tcga)
+```
+
+
+```{r}
+mia_cpop_pred_tcga %>% 
+  ggplot(aes(x = CPOP::expit(cpop_model1),
+             y = CPOP::expit(cpop_model2))) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_abline(colour = "red") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1))
+
+cat("Correlation: ", 
+    cor(CPOP::expit(mia_cpop_pred_tcga$cpop_model1), 
+        CPOP::expit(mia_cpop_pred_tcga$cpop_model2)), "\n")
+
+cat("Concordance (yardstick): ", 
+    yardstick::ccc_vec(mia_cpop_pred_tcga$cpop_model1, 
+                       mia_cpop_pred_tcga$cpop_model2), "\n")
+
+cat("Ideality of correlation: ", 
+    yardstick::iic_vec(mia_cpop_pred_tcga$cpop_model1, 
+                       mia_cpop_pred_tcga$cpop_model2), "\n")
+```
+
+
+## CPOP survival evaluation
+```{r}
+mia_cpop_pred_tcga_surv = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$tcga) %>% 
+  join_tcga_sample_data() %>% 
+  dplyr::rename(
+    pred_prob = cpop_model_avg_prob,
+    pred_class = cpop_model_avg_class)
+
+eval_prediction_df(mia_cpop_pred_tcga_surv)
+```
+
+
+
+# Training Lasso (elastic net) on MIA-NS and MIA-Microarray and predicting on TCGA
+
+Notice now one of the data (MIA-NS) tends to select more features, but a majority of these features were not agreed by MIA-Microarray. This disagreement is a fundamental motivation for developing CPOP.
+
+Furthermore, when breaking up this data by the sign of the constructed Elastic Net model coefficients, we see the disagreed features are also not balanced in sign. This has implications on the final predicted values. Which we will demonstrate in subsections.
+
+```{r}
+set.seed(2022)
+
+mia_lasso_binary = CPOP::naive_glmnet(
+  x1 = list_raw_data_binary$ns %>% t,
+  x2 = list_raw_data_binary$array %>% t,
+  y1 = list_binary_lassoy$ns,
+  y2 = list_binary_lassoy$array,
+  family = "binomial",
+  alpha = 0.1)
+
+# mia_lasso_binary$coef_tbl[[1]] %>%
+#   dplyr::filter(coef1 != 0 | coef2 != 0, coef_name != "(Intercept)") %>%
+#   ggplot(aes(x = coef1, y = coef2, label = coef_name)) +
+#   geom_point() +
+#   geom_abline(colour = "red")
+
+mia_lasso_binary_selected_tbl = mia_lasso_binary$coef_tbl[[1]] %>%
+  dplyr::mutate(selected_ns = (sign(coef1) != 0),
+                selected_array = (sign(coef2) != 0))
+
+ms = yardstick::metric_set(f_meas, bal_accuracy)
+
+mia_lasso_binary_selected_tbl %>% 
+  dplyr::mutate(selected_ns = factor(selected_ns),
+                selected_array = factor(selected_array)) %>% 
+  ms(truth = selected_ns, estimate = selected_array)
+
+mia_lasso_binary_selected_tbl %>% 
+  group_by(selected_ns, selected_array) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  ggplot(aes(x = selected_ns, y = selected_array, label = n)) +
+  geom_tile(colour = "grey20", fill = "grey80") +
+  geom_text(size = 5) +
+  scale_fill_distiller(palette = "Blues", direction = 1)
+
+mia_lasso_binary$coef_tbl[[1]] %>%
+  group_by(sign_ns = sign(coef1), sign_array = sign(coef2)) %>%
+  tally() %>%
+  ungroup() %>%
+  tidyr::complete(sign_ns, sign_array, fill = list(n = 0)) %>%
+  ggplot(aes(x = sign_ns, y = sign_array,
+             label = n)) +
+  geom_tile(colour = "grey20", fill = "grey80") +
+  geom_text(size = 5) +
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  labs(x = "Sign of MIA-NanoString Lasso model coef.",
+       y = "Sign of MIA-Microarray Lasso model coef.")
+```
+
+
+## Naive Lasso survival evaluation
+
+NanoString:
+
+```{r}
+ns_lasso_pred_tcga_surv = tibble(
+    samples = rownames(list_lratio_survival$tcga),
+    pred_prob = predict(mia_lasso_binary$glmnet1, 
+                        newx = list_lratio_survival$tcga, 
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(mia_lasso_binary$glmnet1, 
+                         newx = list_lratio_survival$tcga, 
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+eval_prediction_df(ns_lasso_pred_tcga_surv)
+```
+
+Array
+
+```{r}
+array_lasso_pred_tcga_surv = tibble(
+    samples = rownames(list_lratio_survival$tcga),
+    pred_prob = predict(mia_lasso_binary$glmnet2, 
+                        newx = list_lratio_survival$tcga, 
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(mia_lasso_binary$glmnet2, 
+                         newx = list_lratio_survival$tcga, 
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+eval_prediction_df(array_lasso_pred_tcga_surv)
+```
+
+# Overlapping the top k features via t-stat
+```{r}
+library(genefilter)
+ns_colttest = genefilter::colttests(x = list_lratio_binary$ns, fac = list_binary_lassoy$ns) %>% 
+  tibble::rownames_to_column("lratio_name") %>% as_tibble() %>% 
+  dplyr::mutate(abs_stat = abs(statistic),
+                rank_stat = rank(-abs_stat))
+array_colttest = genefilter::colttests(x = list_lratio_binary$array, fac = list_binary_lassoy$array) %>% 
+  tibble::rownames_to_column("lratio_name") %>% as_tibble() %>% 
+  dplyr::mutate(abs_stat = abs(statistic),
+                rank_stat = rank(-abs_stat))
+
+tcga_colttest = genefilter::colttests(x = list_lratio_binary$tcga, fac = factor(list_binary_lassoy$tcga)) %>% 
+  tibble::rownames_to_column("lratio_name") %>% as_tibble() %>% 
+  dplyr::mutate(abs_stat = abs(statistic),
+                rank_stat = rank(-abs_stat))
+
+top_k_tbl = tibble(
+  k = 1:500,
+  `(NS, Microarray)` = purrr::map_int(
+    .x = k,
+    .f = ~ {
+      length(intersect(
+        ns_colttest %>% dplyr::filter(rank_stat <= .x) %>% dplyr::pull(lratio_name),
+        array_colttest %>% dplyr::filter(rank_stat <= .x) %>% dplyr::pull(lratio_name)))
+    }),
+  `(NS, TCGA)` = purrr::map_int(
+    .x = k,
+    .f = ~ {
+      length(intersect(
+        ns_colttest %>% dplyr::filter(rank_stat <= .x) %>% dplyr::pull(lratio_name),
+        tcga_colttest %>% dplyr::filter(rank_stat <= .x) %>% dplyr::pull(lratio_name)))
+    }),
+  `(Microarray, TCGA)` = purrr::map_int(
+    .x = k,
+    .f = ~ {
+      length(intersect(
+        array_colttest %>% dplyr::filter(rank_stat <= .x) %>% dplyr::pull(lratio_name),
+        tcga_colttest %>% dplyr::filter(rank_stat <= .x) %>% dplyr::pull(lratio_name)))
+    })
+)
+
+top_k_tbl %>%
+  pivot_longer(cols = -c("k"), 
+               names_to = "type", 
+               values_to = "count") %>% 
+  dplyr::mutate(proportion = count/k) %>% 
+  ggplot(aes(x = k, y = proportion,
+             colour = type)) +
+  geom_line(size = 1.2) +
+  scale_colour_brewer(palette = "Set1") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(y = "Proportion of overlap in the top k features",
+       x = "k",
+       colour = "Pairings")
+```
+
+
+
+<!-- ## Using `sva::ComBat` on NS+TCGA and predict on TCGA -->
+
+<!-- ```{r} -->
+<!-- ns_tcga_combat = sva::ComBat( -->
+<!--   dat = rbind(list_lratio_binary$ns, list_lratio_binary$tcga) %>% t, -->
+<!--   batch = c(rep("NS", nrow(list_lratio_binary$ns)), rep("TCGA", nrow(list_lratio_binary$tcga))), -->
+<!--   mod = NULL, par.prior = TRUE, mean.only = FALSE) -->
+
+<!-- ns_combat = ns_tcga_combat[,rownames(list_lratio_binary$ns)] %>% t -->
+<!-- tcga_combat = ns_tcga_combat[,rownames(list_lratio_binary$tcga)] %>% t -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- set.seed(2022) -->
+
+<!-- ns_combat_lasso = glmnet::cv.glmnet( -->
+<!--   x = ns_combat, -->
+<!--   y = list_binary_lassoy$ns, -->
+<!--   family = "binomial", alpha = 0.1) -->
+
+<!-- ns_combat_lasso_pred_tcga = tibble( -->
+<!--     samples = rownames(list_lratio_binary$tcga), -->
+<!--     pred_prob = predict(ns_combat_lasso,  -->
+<!--                         newx = list_lratio_binary$tcga, type = "response", s = "lambda.min") %>% as.vector(), -->
+<!--     pred_class = predict(ns_combat_lasso,  -->
+<!--                          newx = list_lratio_binary$tcga, type = "class", s = "lambda.min") %>% as.vector()) %>% -->
+<!--   join_tcga_sample_data() -->
+<!-- ``` -->
+
+<!-- ## Using `sva::ComBat` on Microarray+TCGA and predict on TCGA -->
+
+<!-- ```{r} -->
+<!-- array_tcga_combat = sva::ComBat( -->
+<!--   dat = rbind(list_lratio_binary$array, list_lratio_binary$tcga) %>% t, -->
+<!--   batch = c(rep("array", nrow(list_lratio_binary$array)), rep("TCGA", nrow(list_lratio_binary$tcga))), -->
+<!--   mod = NULL, par.prior = TRUE, mean.only = FALSE) -->
+
+<!-- array_combat = array_tcga_combat[,rownames(list_lratio_binary$array)] %>% t -->
+<!-- tcga_combat = array_tcga_combat[,rownames(list_lratio_binary$tcga)] %>% t -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- set.seed(2022) -->
+
+<!-- array_combat_lasso = glmnet::cv.glmnet( -->
+<!--   x = array_combat, -->
+<!--   y = list_binary_lassoy$array, -->
+<!--   family = "binomial", alpha = 0.1) -->
+
+<!-- array_combat_lasso_pred_tcga = tibble( -->
+<!--     samples = rownames(list_lratio_binary$tcga), -->
+<!--     pred_prob = predict(array_combat_lasso,  -->
+<!--                         newx = list_lratio_binary$tcga, type = "response", s = "lambda.min") %>% as.vector(), -->
+<!--     pred_class = predict(array_combat_lasso,  -->
+<!--                          newx = list_lratio_binary$tcga, type = "class", s = "lambda.min") %>% as.vector()) %>% -->
+<!--   join_tcga_sample_data() -->
+<!-- ``` -->
+
+<!-- ## Comparing prediction scores for `ComBat` samples -->
+
+<!-- ```{r} -->
+<!-- combine_combat_pred_tcga = inner_join( -->
+<!--     x = ns_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class), -->
+<!--     y = array_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class), -->
+<!--     by = "samples", suffix = c("_ns", "_array")) -->
+
+<!-- combine_combat_pred_tcga %>% -->
+<!--   ggplot(aes(x = pred_prob_ns, y = pred_prob_array)) + -->
+<!--   geom_point() + -->
+<!--   geom_smooth(method = "lm") + -->
+<!--   geom_abline(colour = "red") + -->
+<!--   scale_x_continuous(limits = c(0, 1)) + -->
+<!--   scale_y_continuous(limits = c(0, 1)) -->
+
+<!-- cat("Correlation: ", cor(combine_combat_pred_tcga$pred_prob_ns,  -->
+<!--                          combine_combat_pred_tcga$pred_prob_array), "\n") -->
+<!-- ``` -->
+
+# Normalise NS, Array, TCGA and predict on TCGA
+
+```{r,fig.width=14}
+mia_tcga_mat = rbind(
+  list_lratio_binary$ns, 
+  list_lratio_binary$array, 
+  list_lratio_survival$tcga) %>% t
+mia_tcga_colnames = c(
+  paste0(rownames(list_lratio_binary$ns), "_ns"),
+  paste0(rownames(list_lratio_binary$array), "_array"),
+  paste0(rownames(list_lratio_survival$tcga), "_tcga"))
+colnames(mia_tcga_mat) = mia_tcga_colnames
+
+mia_tcga_combat = sva::ComBat(
+  dat = mia_tcga_mat,
+  batch = c(rep("ns", nrow(list_lratio_binary$ns)), 
+            rep("array", nrow(list_lratio_binary$array)),
+            rep("tcga", nrow(list_lratio_survival$tcga))))
+
+ns_combat = mia_tcga_combat[,str_detect(mia_tcga_colnames, "_ns$")] %>% t
+array_combat = mia_tcga_combat[,str_detect(mia_tcga_colnames, "_array$")] %>% t
+tcga_combat = mia_tcga_combat[,!str_detect(mia_tcga_colnames, "_ns$|_array")] %>% t
+
+mia_tcga_mat[1:5,1:5]
+mia_tcga_combat[1:5,1:5]
+
+mia_tcga_mat %>% 
+  CPOP::boxplot_tbl(2) %>% 
+  tidyr::separate(col = "object", into = c("sample_ID", "platform"), 
+                  sep = "_", remove = FALSE) %>% 
+  ggplot(aes(x = object, y = means,
+             ymin = q1, ymax = q3,
+             colour = platform)) +
+  geom_point() +
+  geom_linerange() +
+  scale_colour_brewer(palette = "Set1") +
+  scale_y_continuous(limits = c(-3, 3), breaks = -3:3) +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  labs(title = "Combined log-ratio boxplot") + 
+  mia_tcga_combat %>% 
+  CPOP::boxplot_tbl(2) %>% 
+  tidyr::separate(col = "object", into = c("sample_ID", "platform"), 
+                  sep = "_", remove = FALSE) %>% 
+  ggplot(aes(x = object, y = means,
+             ymin = q1, ymax = q3,
+             colour = platform)) +
+  geom_point() +
+  geom_linerange() +
+  scale_colour_brewer(palette = "Set1") +
+  scale_y_continuous(limits = c(-3, 3), breaks = -3:3) +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank()) +
+  labs(title = "Combat boxplot") +
+  patchwork::plot_layout(guides = "collect")
+```
+
+## Model generation
+
+```{r}
+set.seed(202201)
+
+ns_combat_lasso = glmnet::cv.glmnet(
+  x = ns_combat,
+  y = list_binary_lassoy$ns,
+  family = "binomial", alpha = 0.1, nfolds = 5)
+
+ns_combat_lasso_pred_tcga = tibble(
+    samples = rownames(list_lratio_binary$tcga),
+    pred_prob = predict(ns_combat_lasso, 
+                        newx = list_lratio_binary$tcga, 
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(ns_combat_lasso, 
+                         newx = list_lratio_binary$tcga, 
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+array_combat_lasso = glmnet::cv.glmnet(
+  x = array_combat,
+  y = list_binary_lassoy$array,
+  family = "binomial", alpha = 0.1, nfolds = 5)
+
+array_combat_lasso_pred_tcga = tibble(
+    samples = rownames(list_lratio_binary$tcga),
+    pred_prob = predict(array_combat_lasso, 
+                        newx = list_lratio_binary$tcga, 
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(array_combat_lasso, 
+                         newx = list_lratio_binary$tcga, 
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+```
+
+## Compare feature selection
+```{r}
+ns_combat_lasso_coef = coef(ns_combat_lasso, s = "lambda.min") %>% 
+  as.matrix() %>% as.data.frame() %>% magrittr::set_colnames("coef_ns") %>% 
+  tibble::rownames_to_column("lratio_name") %>% 
+  tibble::as_tibble()
+array_combat_lasso_coef = coef(array_combat_lasso, s = "lambda.min") %>% 
+  as.matrix() %>% as.data.frame() %>% magrittr::set_colnames("coef_array") %>% 
+  tibble::rownames_to_column("lratio_name") %>% 
+  tibble::as_tibble()
+
+combine_ns_array_combat_coef = inner_join(
+  ns_combat_lasso_coef, 
+  array_combat_lasso_coef,
+  by = c("lratio_name"))
+
+sum(combine_ns_array_combat_coef$coef_ns != 0)
+sum(combine_ns_array_combat_coef$coef_array != 0)
+
+combine_ns_array_combat_coef %>%
+  group_by(sign_ns = sign(coef_ns), sign_array = sign(coef_array)) %>%
+  tally() %>%
+  ungroup() %>%
+  tidyr::complete(sign_ns, sign_array, fill = list(n = 0)) %>%
+  ggplot(aes(x = sign_ns, y = sign_array,
+             label = n)) +
+  geom_tile(colour = "grey20", fill = "grey80") +
+  geom_text(size = 5) +
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  labs(x = "Sign of MIA-NanoString (Combat norm.) Lasso model coef.",
+       y = "Sign of MIA-Microarray (Combat norm.) Lasso model coef.")
+```
+
+## Prediction values 
+
+```{r}
+combine_combat_pred_tcga = inner_join(
+    x = ns_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class),
+    y = array_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class),
+    by = "samples", suffix = c("_ns", "_array"))
+
+combine_combat_pred_tcga %>%
+  ggplot(aes(x = pred_prob_ns, y = pred_prob_array)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_abline(colour = "red") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1))
+
+cat("Correlation: ", cor(combine_combat_pred_tcga$pred_prob_ns, 
+                         combine_combat_pred_tcga$pred_prob_array), "\n")
+
+cat("Concordance (yardstick): ", 
+    yardstick::ccc_vec(combine_combat_pred_tcga$pred_prob_ns, 
+                       combine_combat_pred_tcga$pred_prob_array), "\n")
+
+cat("Ideality of correlation: ", 
+    yardstick::iic_vec(combine_combat_pred_tcga$pred_prob_ns, 
+                       combine_combat_pred_tcga$pred_prob_array), "\n")
+```
+
+## Survival prediction
+
+### NanoString
+
+```{r}
+ns_combat_lasso_pred_tcga_surv = tibble(
+    samples = rownames(list_lratio_survival$tcga),
+    pred_prob = predict(ns_combat_lasso, 
+                        newx = list_lratio_survival$tcga, 
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(ns_combat_lasso, 
+                         newx = list_lratio_survival$tcga, 
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+eval_prediction_df(ns_combat_lasso_pred_tcga_surv)
+```
+
+### Array
+
+```{r}
+array_combat_lasso_pred_tcga_surv = tibble(
+    samples = rownames(list_lratio_survival$tcga),
+    pred_prob = predict(array_combat_lasso, 
+                        newx = list_lratio_survival$tcga, 
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(array_combat_lasso,
+                         newx = list_lratio_survival$tcga, 
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+eval_prediction_df(array_combat_lasso_pred_tcga_surv)
+```
+
+
+### NanoString + Array
+
+```{r}
+set.seed(2022)
+
+ns_array_combat_lasso = glmnet::cv.glmnet(
+  x = rbind(ns_combat, array_combat),
+  y = c(list_binary_lassoy$ns, list_binary_lassoy$array),
+  family = "binomial",
+  alpha = 1,
+  nfolds = 5)
+
+ns_array_combat_lasso_pred_tcga_surv = tibble(
+    samples = rownames(list_lratio_survival$tcga),
+    pred_prob = predict(ns_array_combat_lasso,
+                        newx = list_lratio_survival$tcga,
+                        type = "response", s = "lambda.min") %>% as.vector(),
+    pred_class = predict(ns_array_combat_lasso,
+                         newx = list_lratio_survival$tcga,
+                         type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+eval_prediction_df(ns_array_combat_lasso_pred_tcga_surv)
+```
+
+# Bootstrap CPOP model, correlation and concodance
+
+We will perform bootstrap on the columns of the melanoma data MIA-NanoString and MIA-Microarray to introduce perturbation in the CPOP model. We will do the same procedure on the Combat-MIA-NanoString-normalised and Combat-MIA-Microarray-normalised data. 
+
+```{r, eval = FALSE}
+# set.seed(2022)
+# nexp = 100
+# library(furrr)
+# plan(multisession, workers = 5)
+#
+# boot_models_tbl = furrr::future_map(
+#   .x = 1:nexp,
+#   .f = ~ {
+#     ns_index = sample(seq_len(nrow(list_lratio_binary$ns)), replace = TRUE)
+#     array_index = sample(seq_len(nrow(list_lratio_binary$ns)), replace = TRUE)
+#
+#     mia_cpop_binary = CPOP::cpop_model(
+#       z1 = list_lratio_binary$ns[ns_index, ],
+#       z2 = list_lratio_binary$array[array_index, ],
+#       y1 = list_binary_lassoy$ns[ns_index],
+#       y2 = list_binary_lassoy$array[array_index],
+#       family = "binomial",
+#       alpha = 0.1, folds = 5,
+#       n_features = 20)
+#
+#     ns_combat_lasso = glmnet::cv.glmnet(
+#       x = ns_combat[ns_index, ],
+#       y = list_binary_lassoy$ns[ns_index],
+#       family = "binomial", alpha = 0.1,
+#       nfolds = 5)
+#
+#     array_combat_lasso = glmnet::cv.glmnet(
+#       x = array_combat[array_index,],
+#       y = list_binary_lassoy$array[array_index],
+#       family = "binomial", alpha = 0.1,
+#       nfolds = 5)
+#
+#     return(list(mia_cpop_binary = mia_cpop_binary,
+#                 ns_combat_lasso = ns_combat_lasso,
+#                 array_combat_lasso = array_combat_lasso))
+#   }, .progress = TRUE)
+#
+# boot_models_tbl = boot_models_tbl %>% magrittr::set_names(value = paste0("exp_", 1:nexp))
+# saveRDS(boot_models_tbl, file = "../data/processed_data/boot_models_raw_and_combat_tbl_23_Jan_2022.rds")
+```
+
+```{r}
+boot_models_tbl = readRDS(file = "../data/processed_data/boot_models_raw_and_combat_tbl_23_Jan_2022.rds")
+```
+
+
+```{r}
+cpop_boot_pred_tcga_tbl = boot_models_tbl %>%
+  purrr::map("mia_cpop_binary") %>%
+  purrr::map_dfr(
+    .x = .,
+    .f = ~ predict_cpop(.x, newz = list_lratio_binary$tcga),
+    .id = "exp_num") %>%
+  join_tcga_sample_data() %>%
+  dplyr::rename(
+    pred_prob = cpop_model_avg_prob,
+    pred_class = cpop_model_avg_class)
+
+cpop_boot_pred_tcga_tbl %>%
+  ggplot(aes(
+    x = CPOP::expit(cpop_model1),
+    y = CPOP::expit(cpop_model2),
+    group = exp_num)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_abline(colour = "red") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1))
+
+cpop_boot_concord_tbl = cpop_boot_pred_tcga_tbl %>%
+  group_by(exp_num) %>%
+  summarise(
+    corr = cor(CPOP::expit(cpop_model1), CPOP::expit(cpop_model2)),
+    ccc = yardstick::ccc_vec(CPOP::expit(cpop_model1), CPOP::expit(cpop_model2)))
+```
+
+## Lasso evaluation
+
+```{r}
+lasso_boot_pred_tcga_tbl = boot_models_tbl %>%
+  purrr::map_dfr(.f = ~{
+    ns_combat_lasso_pred_tcga = tibble(
+      samples = rownames(tcga_combat),
+      pred_prob = predict(.x$ns_combat_lasso,
+                          newx = tcga_combat,
+                          type = "response", s = "lambda.min") %>% as.vector(),
+      pred_class = predict(.x$ns_combat_lasso,
+                           newx = tcga_combat,
+                           type = "class", s = "lambda.min") %>% as.vector())
+
+    array_combat_lasso_pred_tcga = tibble(
+      samples = rownames(tcga_combat),
+      pred_prob = predict(.x$array_combat_lasso,
+                          newx = tcga_combat,
+                          type = "response", s = "lambda.min") %>% as.vector(),
+      pred_class = predict(.x$array_combat_lasso,
+                           newx = tcga_combat,
+                           type = "class", s = "lambda.min") %>% as.vector())
+
+    combine_combat_pred_tcga = inner_join(
+      x = ns_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class),
+      y = array_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class),
+      by = "samples", suffix = c("_ns", "_array"))
+    return(combine_combat_pred_tcga)
+    }, .id = "exp_num") %>%
+  dplyr::mutate(samples = samples %>% str_remove_all("_tcga")) %>%
+  join_tcga_sample_data()
+
+
+lasso_boot_pred_tcga_tbl %>%
+  ggplot(aes(
+    x = pred_prob_ns,
+    y = pred_prob_array,
+    group = exp_num)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  geom_abline(colour = "red") +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1))
+
+lasso_boot_concord_tbl = lasso_boot_pred_tcga_tbl %>%
+  group_by(exp_num) %>%
+  summarise(
+    corr = cor(pred_prob_ns, pred_prob_array),
+    ccc = yardstick::ccc_vec(pred_prob_ns, pred_prob_array))
+```
+
+## Combing concordance metrics
+
+```{r, fig.height=7}
+combine_boot_concord_tbl = inner_join(
+  cpop_boot_concord_tbl, lasso_boot_concord_tbl, by = "exp_num",
+  suffix = c("_cpop", "_lasso"))
+
+combine_boot_concord_tbl_long = combine_boot_concord_tbl %>%
+  pivot_longer(cols = -exp_num) %>%
+  tidyr::separate(col = name, into = c("metric", "model"), remove = FALSE) %>%
+  dplyr::mutate(metric = case_when(
+    metric == "ccc" ~ "Concordance",
+    metric == "corr" ~ "Correlation",
+    TRUE ~ NA_character_))
+
+combine_boot_concord_tbl_long %>%
+  ggplot(aes(x = model, y = value)) +
+  geom_boxplot() +
+  facet_wrap(~metric, scales = "free_y")
+
+combine_boot_concord_tbl_long_ccc = combine_boot_concord_tbl_long %>%
+  dplyr::filter(metric == "Concordance")
+
+pairwise.wilcox.test(x = combine_boot_concord_tbl_long$value, g = combine_boot_concord_tbl_long$name)
+```
+
+
