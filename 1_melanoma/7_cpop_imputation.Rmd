@@ -52,9 +52,6 @@ load(paste0(
   "../data/processed_data/Melanoma4_survival_",
   file_version, ".RData"
 ))
-
-## Bootstrapped MIA features 
-load("../data/processed_data/boot_MIA_cpop_2021_Nov_02.RData")
 ```
 
 
