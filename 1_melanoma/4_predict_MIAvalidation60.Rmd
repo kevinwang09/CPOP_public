@@ -201,9 +201,11 @@ ns_v60_exprs_data = ns_v60_exprs_data[ns_v60_exprs_data %>% rownames %>% sort,]
 
 # Save data
 ```{r}
-save(ns_v60_clean_sample_data,
-     ns_v60_exprs_data,
-     file = "../data/processed_data/ns_validation60_2020_Jul_20.RData")
+save(
+  ns_feature_data,
+  ns_v60_clean_sample_data,
+  ns_v60_exprs_data,
+  file = "../data/processed_data/ns_validation60_2022_Feb_07.RData")
 ```
 
 # Running CPOP model 
