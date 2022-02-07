@@ -222,7 +222,7 @@ equal_odds(
 ```
 
 
-## sweden 
+## Sweden 
 ```{r}
 mia_single_pred_sweden = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$sweden) %>% 
   join_sweden_sample_data() %>% 
@@ -278,40 +278,143 @@ equal_odds(
   cutoff  = 0.5)
 ```
 
-<!-- # Fairness calculations on NS and Array  -->
+# Features evaluations
+```{r}
+## We stored all features data in this file.
+load("../data/processed_data/ns_validation60_2022_Feb_07.RData")
+ns_feature_data = ns_feature_data %>% 
+  as_tibble() %>% 
+  dplyr::mutate(
+    accession_short = accession %>% 
+      str_extract("NM_\\s*(.*?)\\s*[.]") %>% 
+      str_remove("[.]"))
+```
 
-<!-- This is not quite fair as NS and Array are the training data themselves. However, we will provide these calculations.  -->
+```{r}
+mia_cpop_binary_genes = mia_cpop_binary$feature %>% 
+  str_split("--") %>% unlist %>% unique
+```
 
-<!-- ```{r, fig_height = 4, fig_width = 6} -->
-<!-- mia_single_pred_ns = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$ns) %>%  -->
-<!--   left_join(list_binary_lassoy_df %>%  -->
-<!--               dplyr::filter(train_data == "train_ns"), -->
-<!--             by = c("samples" = "sample_id")) %>%  -->
-<!--   left_join(rfs_ns_sample_data_reduced %>%  -->
-<!--               dplyr::select(samples = tbid, gender = person_sex), -->
-<!--             by = c("samples")) -->
+```{r, eval = FALSE}
+library(biomaRt)
+gene_list <- c(ns_feature_data$accession_short)
+human <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+gene_coords=getBM(
+  attributes=c("hgnc_symbol","refseq_mrna", "start_position","end_position"), 
+  filters="refseq_mrna", 
+  values=gene_list, mart=human)
+gene_coords$length = gene_coords$end_position - gene_coords$start_position
+saveRDS(gene_coords, file = "../data/processed_data/nanostring_gene_length_2022_Feb_07.RData")
+```
 
-<!-- equal_odds( -->
-<!--   data  = mia_single_pred_ns, -->
-<!--   outcome = 'classification', -->
-<!--   probs   = 'cpop_model_avg_prob', -->
-<!--   group   = 'gender', -->
-<!--   cutoff  = 0.5) -->
-<!-- ``` -->
 
-<!-- ```{r, fig_height = 4, fig_width = 6} -->
-<!-- mia_single_pred_array = predict_cpop(mia_cpop_binary, newz = list_lratio_survival$array) %>%  -->
-<!--   left_join(list_binary_lassoy_df %>%  -->
-<!--               dplyr::filter(train_data == "train_array"), -->
-<!--             by = c("samples" = "sample_id")) %>%  -->
-<!--   left_join(rfs_array_sample_data_reduced %>%  -->
-<!--               dplyr::select(samples = tbid, gender = person_sex), -->
-<!--             by = c("samples")) -->
+```{r}
+gene_lengths = readRDS("../data/processed_data/nanostring_gene_length_2022_Feb_07.RData") %>% 
+  as_tibble() %>% 
+  group_by(hgnc_symbol, refseq_mrna) %>% 
+  summarise(length = median(length))
 
-<!-- equal_odds( -->
-<!--   data  = mia_single_pred_array, -->
-<!--   outcome = 'classification', -->
-<!--   probs   = 'cpop_model_avg_prob', -->
-<!--   group   = 'gender', -->
-<!--   cutoff  = 0.5) -->
-<!-- ``` -->
+ns_feature_data_length = ns_feature_data %>% 
+  inner_join(gene_lengths, 
+             by = c("gene_name" = "hgnc_symbol", 
+                    "accession_short" = "refseq_mrna")) %>% 
+  dplyr::mutate(cpop_selected = gene_name %in% mia_cpop_binary_genes)
+```
+
+```{r}
+library(ggbeeswarm)
+
+ns_feature_data_length %>% 
+  ggplot(aes(x = cpop_selected, y = length)) +
+  geom_violin(width = 0.5) +
+  geom_boxplot(width = 0.2) +
+  geom_quasirandom(width = 0.1) +
+  scale_y_log10(label = scales::label_comma()) +
+  labs(x = "CPOP selected", 
+       y = "Gene length")
+
+wilcox.test(log10(length) ~ cpop_selected, 
+            data = ns_feature_data_length)
+```
+
+```{r}
+gene_median_plotdf = list_raw_data_binary %>% 
+  purrr::map_dfr(
+    .f = ~ {
+      apply(.x, 1, median) %>% 
+        tibble(
+          gene_name = names(.),
+          gene_expr_median = .) %>% 
+        dplyr::mutate(
+          cpop_selected = gene_name %in% mia_cpop_binary_genes)
+    }, .id = "data_name") %>% 
+  dplyr::mutate(
+    data_name = case_when(
+      data_name == "array" ~ "MIA-Microarray",
+      data_name == "ns" ~ "MIA-NanoString",
+      data_name == "tcga" ~ "TCGA",
+      data_name == "sweden" ~ "Sweden")
+  )
+   
+
+gene_median_plotdf %>% 
+  ggplot(aes(x = cpop_selected, y = gene_expr_median)) +
+  geom_violin(width = 0.5) +
+  geom_boxplot(width = 0.2) +
+  geom_quasirandom(size = 0.5, width = 0.1) + 
+  facet_wrap(~data_name, scales =  "free_y") + 
+  labs(x = "CPOP selected", 
+       y = "Median of gene expression")
+
+gene_median_plotdf %>% 
+  group_by(data_name) %>% 
+  tidyr::nest() %>% 
+  dplyr::mutate(
+    wilcox_tidy = purrr::map_dfr(
+      .x = data, 
+      .f = ~ broom::tidy(wilcox.test(gene_expr_median ~ cpop_selected, data = .x)))
+    ) %>% 
+  dplyr::select(-data)
+```
+
+```{r}
+ratio_median_plotdf = list_lratio_binary %>% 
+  purrr::map_dfr(
+    .f = ~ {
+      apply(.x, 2, median) %>% 
+        tibble(
+          ratio_name = names(.),
+          ratio_median = .) %>% 
+        dplyr::mutate(
+          cpop_selected = ratio_name %in% mia_cpop_binary$feature)
+    }, .id = "data_name") %>% 
+  dplyr::mutate(
+    data_name = case_when(
+      data_name == "array" ~ "MIA-Microarray",
+      data_name == "ns" ~ "MIA-NanoString",
+      data_name == "tcga" ~ "TCGA",
+      data_name == "sweden" ~ "Sweden")
+  )
+   
+
+ratio_median_plotdf %>% 
+  ggplot(aes(x = cpop_selected, y = ratio_median)) +
+  geom_violin(width = 0.5) +
+  geom_boxplot(width = 0.2) +
+  # geom_quasirandom(size = 0.5, width = 0.1) + 
+  facet_wrap(~data_name, scales =  "free_y") + 
+  labs(x = "CPOP selected", 
+       y = "Median of log-ratio")
+
+ratio_median_plotdf %>% 
+  group_by(data_name) %>% 
+  tidyr::nest() %>% 
+  dplyr::mutate(
+    wilcox_tidy = purrr::map_dfr(
+      .x = data, 
+      .f = ~ broom::tidy(wilcox.test(ratio_median ~ cpop_selected, data = .x)))
+    ) %>% 
+  dplyr::select(-data)
+```
+
+
