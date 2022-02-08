@@ -193,14 +193,19 @@ mia_cpop_pred_tcga = predict_cpop(mia_cpop_binary, newz = list_lratio_binary$tcg
 
 
 ```{r}
-mia_cpop_pred_tcga %>% 
+mia_cpop_pred_tcga_scatterplot = mia_cpop_pred_tcga %>% 
   ggplot(aes(x = CPOP::expit(cpop_model1),
              y = CPOP::expit(cpop_model2))) +
   geom_point() +
   geom_smooth(method = "lm") +
   geom_abline(colour = "red") +
   scale_x_continuous(limits = c(0, 1)) +
-  scale_y_continuous(limits = c(0, 1))
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Prediction from MIA-NanoString",
+       y = "Prediction from MIA-Microarray",
+       title = "CPOP predictions on the TCGA data (unnormalised)")
+
+mia_cpop_pred_tcga_scatterplot
 
 cat("Correlation: ", 
     cor(CPOP::expit(mia_cpop_pred_tcga$cpop_model1), 
@@ -484,7 +489,7 @@ tcga_combat = mia_tcga_combat[,!str_detect(mia_tcga_colnames, "_ns$|_array")] %>
 mia_tcga_mat[1:5,1:5]
 mia_tcga_combat[1:5,1:5]
 
-mia_tcga_mat %>% 
+combat_boxplots = mia_tcga_mat %>% 
   CPOP::boxplot_tbl(2) %>% 
   tidyr::separate(col = "object", into = c("sample_ID", "platform"), 
                   sep = "_", remove = FALSE) %>% 
@@ -497,7 +502,8 @@ mia_tcga_mat %>%
   scale_y_continuous(limits = c(-3, 3), breaks = -3:3) +
   theme(axis.ticks.x = element_blank(),
         axis.text.x = element_blank()) +
-  labs(title = "Combined log-ratio boxplot") + 
+  labs(title = "Combined log-ratio boxplot",
+       x = "Samples", y = "Values") + 
   mia_tcga_combat %>% 
   CPOP::boxplot_tbl(2) %>% 
   tidyr::separate(col = "object", into = c("sample_ID", "platform"), 
@@ -511,8 +517,14 @@ mia_tcga_mat %>%
   scale_y_continuous(limits = c(-3, 3), breaks = -3:3) +
   theme(axis.ticks.x = element_blank(),
         axis.text.x = element_blank()) +
-  labs(title = "Combat boxplot") +
+  labs(title = "Combined log-ratio boxplot",
+       x = "Samples", y = "Values") + 
   patchwork::plot_layout(guides = "collect")
+
+ggsave(
+  plot = combat_boxplots, 
+  filename = paste0("../figures/combat_normalised_sample_boxplots_", today, ".eps"),
+  height = 6, width = 12)
 ```
 
 ## Model generation
@@ -592,13 +604,18 @@ combine_combat_pred_tcga = inner_join(
     y = array_combat_lasso_pred_tcga %>% dplyr::select(samples, pred_prob, pred_class),
     by = "samples", suffix = c("_ns", "_array"))
 
-combine_combat_pred_tcga %>%
+combine_combat_pred_tcga_scatterplot = combine_combat_pred_tcga %>%
   ggplot(aes(x = pred_prob_ns, y = pred_prob_array)) +
   geom_point() +
   geom_smooth(method = "lm") +
   geom_abline(colour = "red") +
   scale_x_continuous(limits = c(0, 1)) +
-  scale_y_continuous(limits = c(0, 1))
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = "Prediction from MIA-NanoString (normalised)",
+       y = "Prediction from MIA-Microarray (normalised)",
+       title = "Lasso predictions on the TCGA data (normalised)")
+
+combine_combat_pred_tcga_scatterplot
 
 cat("Correlation: ", cor(combine_combat_pred_tcga$pred_prob_ns, 
                          combine_combat_pred_tcga$pred_prob_array), "\n")
@@ -819,10 +836,22 @@ combine_boot_concord_tbl_long = combine_boot_concord_tbl %>%
     metric == "corr" ~ "Correlation",
     TRUE ~ NA_character_))
 
-combine_boot_concord_tbl_long %>%
-  ggplot(aes(x = model, y = value)) +
+cpop_vs_lasso_concord_boxplot = combine_boot_concord_tbl_long %>%
+  dplyr::mutate(x = ifelse(model == "cpop", 
+                           "CPOP \n (unnormalised)", 
+                           "Lasso \n (normalised)")) %>% 
+  ggplot(aes(x = x, y = value)) +
   geom_boxplot() +
-  facet_wrap(~metric, scales = "free_y")
+  labs(x = "", y = "") +
+  facet_wrap(~metric, scales = "free_y") 
+  
+cpop_vs_lasso_concord_boxplot
+
+ggsave(
+  plot = (mia_cpop_pred_tcga_scatterplot + 
+    combine_combat_pred_tcga_scatterplot)/cpop_vs_lasso_concord_boxplot,
+  filename = paste0("../figures/CPOPraw_vs_ComBatnormed_evaluations_", today, ".eps"),
+  height = 14, width = 14) 
 
 combine_boot_concord_tbl_long_ccc = combine_boot_concord_tbl_long %>%
   dplyr::filter(metric == "Concordance")
