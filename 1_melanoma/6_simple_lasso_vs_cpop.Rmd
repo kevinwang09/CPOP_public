@@ -134,6 +134,94 @@ eval_prediction_df = function(dat){
 }
 ```
 
+# Single Lasso model using MIA-Microarray and MIA-NanoString
+
+## TCGA
+```{r}
+set.seed(2022)
+mia_lasso = glmnet::cv.glmnet(
+  x = rbind(list_lratio_binary$ns, list_lratio_binary$array),
+  y = c(list_binary_lassoy$ns, list_binary_lassoy$array),
+  family = "binomial", alpha = 1)
+
+mia_lasso_pred_tcga = tibble(
+  samples = rownames(list_lratio_survival$tcga),
+  pred_prob = predict(
+    mia_lasso,
+    newx = list_lratio_survival$tcga, type = "response", s = "lambda.min") %>% as.vector(),
+  pred_class = predict(
+    mia_lasso,
+    newx = list_lratio_survival$tcga, type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_tcga_sample_data()
+
+table(mia_lasso_pred_tcga$pred_class)
+
+mia_tcga_km = survminer::ggsurvplot(
+  fit = survfit(Surv(time, status) ~ pred_class, 
+                data = mia_lasso_pred_tcga), 
+  data = mia_lasso_pred_tcga, 
+  break.time.by = 5,
+  pval = TRUE, risk.table = "nrisk_cumevents")
+
+mia_tcga_km2 = mia_tcga_km$plot +
+  ggsci::scale_colour_d3()
+
+mia_tcga_km3 = mia_tcga_km$table +
+  ggsci::scale_colour_d3()
+
+coxph(Surv(time, status) ~ pred_class + age + gender, 
+      data = mia_lasso_pred_tcga) %>% 
+  summary()
+```
+
+## Sweden
+```{r}
+set.seed(2022)
+mia_lasso = glmnet::cv.glmnet(
+  x = rbind(list_lratio_binary$ns, list_lratio_binary$array),
+  y = c(list_binary_lassoy$ns, list_binary_lassoy$array),
+  family = "binomial", alpha = 1)
+
+mia_lasso_pred_sweden = tibble(
+  samples = rownames(list_lratio_survival$sweden),
+  pred_prob = predict(
+    mia_lasso,
+    newx = list_lratio_survival$sweden, type = "response", s = "lambda.min") %>% as.vector(),
+  pred_class = predict(
+    mia_lasso,
+    newx = list_lratio_survival$sweden, type = "class", s = "lambda.min") %>% as.vector()) %>%
+  join_sweden_sample_data()
+
+table(mia_lasso_pred_sweden$pred_class)
+
+mia_sweden_km = survminer::ggsurvplot(
+  fit = survfit(Surv(time, status) ~ pred_class, 
+                data = mia_lasso_pred_sweden), 
+  data = mia_lasso_pred_sweden, 
+  break.time.by = 5,
+  pval = TRUE, risk.table = "nrisk_cumevents")
+
+mia_sweden_km2 = mia_sweden_km$plot +
+  ggsci::scale_colour_d3()
+
+mia_sweden_km3 = mia_sweden_km$table +
+  ggsci::scale_colour_d3() 
+
+coxph(Surv(time, status) ~ pred_class + age + gender, 
+      data = mia_lasso_pred_sweden) %>% 
+  summary()
+```
+
+```{r}
+ggsave(plot = print(
+  mia_tcga_km2 + mia_sweden_km2 + 
+    mia_tcga_km3 + mia_sweden_km3 +
+    patchwork::plot_layout(ncol = 2, byrow = TRUE, heights = c(3, 1))),
+  filename = paste0("../figures/Lasso_tcga_and_sweden_km_plots_", today, ".eps"),
+  height = 8, width = 14)
+```
+
+
 
 # Cross validation on CPOP/Lasso evaluation on TCGA/Sweden based on Prediction/Resubstitution
 
