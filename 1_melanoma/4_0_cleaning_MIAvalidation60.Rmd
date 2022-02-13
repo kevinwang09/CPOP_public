@@ -87,7 +87,7 @@ load(paste0(
 ```
 
 
-# Processing sample, feature, exprs data for NanoString
+# Processing sample, feature, exprs data for NanoString (commented out to run only once)
 
 
 ## Feature data
@@ -206,100 +206,6 @@ save(
   ns_v60_clean_sample_data,
   ns_v60_exprs_data,
   file = "../data/processed_data/ns_validation60_2022_Feb_07.RData")
-```
-
-# Running CPOP model 
-```{r}
-list_raw_data_binary = list_raw_data_binary %>% purrr::map(t)
-
-list_lratio_binary = purrr::map(list_raw_data_binary, CPOP::pairwise_col_diff)
-
-# c("CPN1", "CXCL13", "CXCR6", "CYP2J2", "CYorf15A", "DARC", "DHRS9", "DNAH2", "CXCL10", "CXCL9", "CYBB", "DCT")
-```
-
-
-```{r}
-load("../data/processed_data/shiny_models_2021_Nov_02.RData")
-
-ns_v60_lratio = ns_v60_exprs_data %>% t %>% CPOP::pairwise_col_diff()
-```
-
-
-# Introduce missing values on the genes 
-
-```{r}
-faulty_genes = c("CPN1", "CXCL13", "CXCR6", "CYP2J2", "CYorf15A", "DARC", "DHRS9", "DNAH2", "CXCL10", "CXCL9", "CYBB", "DCT") %>% toupper()
-
-cpop_lr2genes = stringr::str_split(mia_cpop_binary$feature, "--") %>% unlist %>% unique %>% sort
-
-gplots::venn(
-  lst(faulty_genes, 
-      cpop_lr2genes))
-
-ns_v60_exprs_data_miss = t(ns_v60_exprs_data)[,colnames(list_raw_data_binary$array)]
-ns_v60_exprs_data_miss[,intersect(faulty_genes, colnames(ns_v60_exprs_data_miss))] = NA
-
-ns_v60_exprs_data_impute = CPOP::impute_cpop(cpop_result = mia_cpop_binary, 
-                  x1 = list_raw_data_binary$array, 
-                  x2 = list_raw_data_binary$ns, 
-                  newx = ns_v60_exprs_data_miss)
-
-ns_v60_lratio = ns_v60_exprs_data_impute %>% CPOP::pairwise_col_diff()
-```
-
-
-
-```{r}
-comb_pred_tbl = mia_cpop_binary %>% 
-  CPOP::predict_cpop(newz = ns_v60_lratio) %>%
-  left_join(ns_v60_clean_sample_data, by = c("samples" = "file_name")) %>% 
-  dplyr::mutate(
-    cpop_pred = cpop_model_avg,
-    cpop_prob = CPOP::expit(cpop_model_avg),
-    cpop_pred_class = ifelse(cpop_model_avg > 0, "Poor", "Good"),
-    dead = coalesce(dead, 0))
-
-table(comb_pred_tbl$cpop_pred_class)
-
-comb_pred_tbl %>% 
-  ggplot(aes(x = CPOP::expit(cpop_model1), 
-             y = CPOP::expit(cpop_model2),
-             colour = rfs_class)) +
-  geom_point(size = 3) +
-  xlim(0, 1) +
-  ylim(0, 1) +
-  geom_abline(slope = 1, intercept = 0, colour = "red") +
-  labs(x = "Prediction from MIA - 2015, Array",
-       y = "Prediction from MIA - 2018, NS")
-
-comb_pred_tbl$cpop_pred_class %>% table
-
-table(comb_pred_tbl$cpop_pred_class, 
-      comb_pred_tbl$os_class)
-
-fit = survfit(Surv(RFS/12, dead) ~ cpop_pred_class, 
-              data = comb_pred_tbl %>% 
-                dplyr::filter(plot_keep))
-
-fit
-
-singlemia_validate60_km = ggsurvplot(fit, pval = TRUE, 
-                                     break.time.by = 2,
-                                     risk.table = "nrisk_cumevents")
-
-singlemia_validate60_km2 = singlemia_validate60_km$plot
-singlemia_validate60_km3 = singlemia_validate60_km$table
-
-library(patchwork)
-
-singlemia_validate60_km_plots = singlemia_validate60_km2 + singlemia_validate60_km3 +
-  patchwork::plot_layout(ncol = 1, byrow = FALSE, heights = c(1.5, 1))
-
-ggsave(print(singlemia_validate60_km_plots), 
-       filename = paste0("../figures/validation_60_surv_pred_", today, ".eps"),
-       width = 8, height = 6)
-
-coxph(Surv(RFS, dead) ~ cpop_pred + age, data = comb_pred_tbl)
 ```
 
 # Session Info 
