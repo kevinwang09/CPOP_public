@@ -123,9 +123,15 @@ comb_pred_tbl = mia_cpop_binary %>%
     cpop_pred = cpop_model_avg,
     cpop_prob = CPOP::expit(cpop_model_avg),
     cpop_pred_class = ifelse(cpop_model_avg > 0, "Poor", "Good"),
-    dead = coalesce(dead, 0))
+    dead = coalesce(dead, 0),
+    miav60_median_class = case_when(
+        dead == 0 & RFS > median(RFS, na.rm = TRUE) ~ "Good",
+        dead == 1 & RFS <= median(RFS, na.rm = TRUE) ~ "Poor",
+        TRUE ~ NA_character_)
+)
 
 table(comb_pred_tbl$cpop_pred_class)
+table(comb_pred_tbl$miav60_median_class)
 
 comb_pred_tbl %>% 
   ggplot(aes(x = CPOP::expit(cpop_model1), 
@@ -169,10 +175,23 @@ coxph(Surv(RFS, dead) ~ cpop_pred + age, data = comb_pred_tbl)
 ```
 
 ```{r}
+comb_pred_tbl$gender %>% table(useNA = "always")
+
 comb_pred_tbl %>% 
   ggplot(aes(x = cpop_model_avg_prob, fill = gender)) +
   geom_density(alpha = 0.5) +
   scale_x_continuous(limits = c(0, 1))
+
+wilcox.test(cpop_model_avg_prob ~ gender, data = comb_pred_tbl)
+
+library(fairness)
+equal_odds(
+  data  = comb_pred_tbl %>% 
+    dplyr::filter(complete.cases(miav60_median_class), complete.cases(gender)),
+  outcome = 'miav60_median_class',
+  probs   = 'cpop_model_avg_prob',
+  group   = 'gender',
+  cutoff  = 0.5)
 ```
 
 
