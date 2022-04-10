@@ -30,6 +30,7 @@ cat("This file was compiled on", today)
 
 suppressPackageStartupMessages({
   library(tidyverse)
+  library(patchwork)
 })
 
 theme_set(theme_classic(12) +
@@ -119,7 +120,8 @@ lr_boxplot = list_lr_boxplot_tbl %>%
   labs(title = "", x = "", y = "",
        colour = "")
 
-library(patchwork)
+ge_boxplot + lr_boxplot + patchwork::plot_layout(nrow = 2)
+
 ggsave(filename = paste0("../figures/ge_lr_boxplot_", today, ".eps"),
        plot = ge_boxplot + lr_boxplot + patchwork::plot_layout(nrow = 2), 
        width = 12, height = 8)

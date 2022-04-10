@@ -33,22 +33,29 @@ cat("This file was compiled on", today)
 suppressPackageStartupMessages({
   library(tidyverse)
   library(glmnet)
-  library(furrr)
   library(gplots)
   library(CPOP)
+  library(patchwork)
 })
-
-plan(multicore, workers = 5)
 
 theme_set(theme_classic(14) +
             theme(legend.position = "bottom"))
 
 lassoLambda = "lambda.min"
 
-saveFigure = TRUE
+saveFigure = FALSE
+
+confTable = function(x, y){
+  x = factor(x, levels = c("FALSE", "TRUE"))
+  y = factor(y, levels = c("FALSE", "TRUE"))
+  return(table(x, y))
+}
+
+confTableStats = function(x, y){
+  res1 = confTable(x, y)
+  return(data.frame(t(caret::confusionMatrix(res1)$byClass)))
+}
 ```
-
-
 
 ## Loading data
 ```{r}
@@ -106,14 +113,14 @@ p2 = raw_pca_plotdf %>%
   labs(x = "PCA 3rd component",
        y = "PCA 4th component")
 
-library(patchwork)
-ggsave(plot = p1/p2 + 
+if(saveFigure){
+  ggsave(plot = p1/p2 + 
          patchwork::plot_layout(heights = c(1, 3)), 
        filename = paste0("../figures/Peloqui_batch_effect_13_Sep_2020.pdf"),
        height = 10, 
        width = 8)
+}
 ```
-
 
 
 # t-test for codeset 2
@@ -256,22 +263,9 @@ pred_IBD4_plotdf %>%
   group_by(non_IBD4_data) %>% 
   summarise(
     corr = cor(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)),
-    idenDist = identityDist(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)))
+    iden_dist = identity_dist(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)),
+    concord = yardstick::ccc_vec(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)))
 ```
-
-```{r}
-confTable = function(x, y){
-  x = factor(x, levels = c("FALSE", "TRUE"))
-  y = factor(y, levels = c("FALSE", "TRUE"))
-  return(table(x, y))
-}
-
-confTableStats = function(x, y){
-  res1 = confTable(x, y)
-  return(data.frame(t(caret::confusionMatrix(res1)$byClass)))
-}
-```
-
 
 
 ## Evaluating prediction performance
@@ -298,15 +292,16 @@ listLassoModels_confPlotdf %>%
   geom_tile(colour = "gray") +
   geom_text() +
   scale_fill_distiller(palette = "Spectral", limits = c(0.5, 1)) +
-  theme(legend.text = element_text(angle = 90, hjust = 1)) 
+  theme(legend.text = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Using naive lasso models", 
+       subtitle = "Balanced Accuracy")
 ```
-
 
 ## Identity distance 
 ```{r}
 listLasso_idenDist_plotdf = listLassoModels_pred_transpose %>% 
-  purrr::map(.f = ~ APES::expit(.x)) %>% 
-  purrr::map(.f = ~ proxy::dist(t(.x), method = CPOP::identityDist)) %>% 
+  purrr::map(.f = ~ CPOP::expit(.x)) %>% 
+  purrr::map(.f = ~ proxy::dist(t(.x), method = CPOP::identity_dist)) %>% 
   purrr::map(proxy::as.matrix) %>% 
   purrr::map_dfr(reshape2::melt, .id = "predData") %>% 
   dplyr::transmute(
@@ -339,31 +334,67 @@ listLasso_idenDist_plotdf %>%
 ```
 
 
+## Lin's concordance
+```{r}
+listLasso_concord_plotdf = listLassoModels_pred_transpose %>% 
+  purrr::map(.f = ~ CPOP::expit(.x)) %>% 
+  purrr::map(.f = ~ proxy::dist(t(.x), method = yardstick::ccc_vec)) %>% 
+  purrr::map(proxy::as.matrix) %>% 
+  purrr::map_dfr(reshape2::melt, .id = "predData") %>% 
+  dplyr::transmute(
+    predData = predData,
+    trainData1 = Var1,
+    trainData2 = Var2,
+    concord = value) %>% 
+  tidyr::separate(col = predData, into = c("pred", "predDataName"), sep = "_", remove = FALSE) %>% 
+  tidyr::separate(col = trainData1, into = c("train1", "trainDataName1"), sep = "_", remove = FALSE) %>% 
+  dplyr::select(-pred, -train1) %>% 
+  dplyr::filter(predDataName == trainDataName1) %>%
+  dplyr::select(-trainDataName1, -trainData1) %>% 
+  dplyr::rename(trainData = trainData2) %>% 
+  as_tibble()
+
+
+listLasso_concord_plotdf %>% 
+  ggplot(aes(x = predData, 
+             y = trainData, 
+             fill = concord, 
+             label = round(concord, 2))) +
+  geom_tile() +
+  geom_text(size = 5) +
+  scale_fill_distiller(palette = "Spectral", limits = c(0, 1)) +
+  scale_colour_manual(values = c("TRUE" = "black", "FALSE" = "red")) +
+  theme(legend.text = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Using naive lasso models", 
+       subtitle = "Lin's concordance")
+```
+
+
 # CPOP on IBD2 and 3
 ```{r}
 listLogRatioMatrix = purrr::map(listRawData_split_codeset, CPOP::pairwise_col_diff)
 
 set.seed(11234)
 
-IBD_2_3_top_model = CPOP::cpop_model(
+IBD_2_3_cpop_model = CPOP::cpop_model(
   z1 = listLogRatioMatrix$IBD2,
   z2 = listLogRatioMatrix$IBD3,
-  y1 = sampleInflamed_split_codeset$IBD2,
-  y2 = sampleInflamed_split_codeset$IBD3,
+  y1 = factor(sampleInflamed_split_codeset$IBD2),
+  y2 = factor(sampleInflamed_split_codeset$IBD3),
   alpha = 1,
+  family = "binomial",
   s = "lambda.min",
   top1_iterate = TRUE,
   n_features = 50,
-  intercept = TRUE
-)
+  intercept = TRUE)
 
-IBD_2_3_top_model$feature
+IBD_2_3_cpop_model$feature
 
-plot_cpop(IBD_2_3_top_model, type = "text")
-plot_cpop(IBD_2_3_top_model, type = "ggraph")
+plot_cpop(IBD_2_3_cpop_model, type = "text")
+plot_cpop(IBD_2_3_cpop_model, type = "ggraph")
 
 listTopFeatures_colmeans = listLogRatioMatrix %>% 
-  purrr::map(~.x[,IBD_2_3_top_model$feature]) %>% 
+  purrr::map(~.x[,IBD_2_3_cpop_model$feature]) %>% 
   lapply(colMeans, na.rm = TRUE)
 
 pairs(listTopFeatures_colmeans,
@@ -373,8 +404,6 @@ pairs(listTopFeatures_colmeans,
 ```
 
 
-
-
 # Building CPOP model based on first two batch features
 ```{r}
 set.seed(98)
@@ -382,7 +411,7 @@ list_model_IBD_2_3_topFeatures = purrr::map2(
   .x = listLogRatioMatrix,
   .y = sampleInflamed_split_codeset, 
   .f = ~ glmnet::cv.glmnet(
-    x = .x[,IBD_2_3_top_model$feature],
+    x = .x[,IBD_2_3_cpop_model$feature],
     y = .y,
     family = "binomial",
     alpha = 0,
@@ -391,8 +420,7 @@ list_model_IBD_2_3_topFeatures = purrr::map2(
 ```
 
 
-
-# IBD2-3 Top model evaluation
+# IBD2-3 CPOP model evaluation
 ```{r}
 list_IBD_2_3_pred = vector("list", length(listLogRatioMatrix))
 names(list_IBD_2_3_pred) = paste0("train_", names(listLogRatioMatrix))
@@ -401,7 +429,7 @@ for(i in 1:length(list_IBD_2_3_pred)){
   list_IBD_2_3_pred[[i]] = purrr::map(
     .x = listLogRatioMatrix,
     .f = ~ predict(list_model_IBD_2_3_topFeatures[[i]],
-                   newx = .x[,IBD_2_3_top_model$feature],
+                   newx = .x[,IBD_2_3_cpop_model$feature],
                    s = lassoLambda)
   )
 }
@@ -458,8 +486,8 @@ top_pred_IBD4_plotdf = IBD_2_3_pred_plotdf %>%
 
 
 (IBD_2_3_top_pred_IBD4 = top_pred_IBD4_plotdf %>%
-    ggplot(aes(x = APES::expit(train_IBD4),
-               y = APES::expit(non_IBD4_predValue),
+    ggplot(aes(x = CPOP::expit(train_IBD4),
+               y = CPOP::expit(non_IBD4_predValue),
                colour = SampleInflamed)) +
     geom_point() +
     geom_abline(slope = 1, intercept = 0, colour = "black") +
@@ -477,7 +505,8 @@ top_pred_IBD4_plotdf %>%
   group_by(non_IBD4_data) %>% 
   summarise(
     corr = cor(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)),
-    idenDist = identityDist(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)))
+    iden_dist = identityDist(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)),
+    concord = yardstick::ccc_vec(CPOP::expit(train_IBD4), CPOP::expit(non_IBD4_predValue)))
 
 ```
 
@@ -506,15 +535,16 @@ IBD_2_3_topModel_confPlotdf %>%
   geom_tile(colour = "gray") +
   geom_text() +
   scale_fill_distiller(palette = "Spectral", limits = c(0.5, 1)) +
-  theme(legend.text = element_text(angle = 90, hjust = 1)) 
+  theme(legend.text = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Using CPOP models", 
+       subtitle = "Balanced acccuracy")
 ```
-
 
 ## Identity distance 
 ```{r}
 list_IBD2_3_idenDist_plotdf = list_IBD_2_3_pred_transpose %>% 
-  purrr::map(.f = ~ APES::expit(.x)) %>% 
-  purrr::map(.f = ~ proxy::dist(t(.x), method = CPOP::identityDist)) %>% 
+  purrr::map(.f = ~ CPOP::expit(.x)) %>% 
+  purrr::map(.f = ~ proxy::dist(t(.x), method = CPOP::identity_dist)) %>% 
   purrr::map(proxy::as.matrix) %>% 
   purrr::map_dfr(reshape2::melt, .id = "predData") %>% 
   dplyr::transmute(
@@ -544,6 +574,42 @@ list_IBD2_3_idenDist_plotdf %>%
   theme(legend.text = element_text(angle = 90, hjust = 1)) +
   labs(title = "Using CPOP models", 
        subtitle = "Identity distance")
+```
+
+## Lin's concordance
+```{r}
+list_IBD2_3_idenDist_plotdf = list_IBD_2_3_pred_transpose %>% 
+  purrr::map(.f = ~ CPOP::expit(.x)) %>% 
+  purrr::map(.f = ~ proxy::dist(t(.x), method = yardstick::ccc_vec)) %>% 
+  purrr::map(proxy::as.matrix) %>% 
+  purrr::map_dfr(reshape2::melt, .id = "predData") %>% 
+  dplyr::transmute(
+    predData = predData,
+    trainData1 = Var1,
+    trainData2 = Var2,
+    concord = value) %>% 
+  tidyr::separate(col = predData, into = c("pred", "predDataName"), sep = "_", remove = FALSE) %>% 
+  tidyr::separate(col = trainData1, into = c("train1", "trainDataName1"), sep = "_", remove = FALSE) %>% 
+  dplyr::select(-pred, -train1) %>% 
+  dplyr::filter(predDataName == trainDataName1) %>%
+  dplyr::select(-trainDataName1, -trainData1) %>% 
+  dplyr::rename(trainData = trainData2) %>% 
+  as_tibble()
+
+
+list_IBD2_3_idenDist_plotdf %>% 
+  ggplot(aes(x = predData, 
+             y = trainData, 
+             fill = concord, 
+             label = round(concord, 2))) +
+  geom_tile() +
+  geom_text(size = 5) +
+  # scale_size_identity() +
+  scale_fill_distiller(palette = "Spectral", limits = c(0, 1)) +
+  scale_colour_manual(values = c("TRUE" = "black", "FALSE" = "red")) +
+  theme(legend.text = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Using CPOP models", 
+       subtitle = "Lin's concordance")
 ```
 
 
@@ -582,8 +648,10 @@ combined_pred_IBD4_plotdf =
     scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) +
     scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)))
 
-ggsave(filename = paste0("../figures/peloqui_CPOP_top100DE_pred_", today, ".pdf"),
+if(saveFigure){
+  ggsave(filename = paste0("../figures/peloqui_CPOP_top100DE_pred_", today, ".pdf"),
        plot = compbined_pred_plot, width = 7, height = 6)
+}
 ```
 
 # Session Info
